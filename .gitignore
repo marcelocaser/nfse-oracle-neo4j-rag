@@ -1,0 +1,11 @@
+# Volumes do container Neo4j (docker-compose.yml). São dados de runtime,
+# root-owned e com centenas de MB.
+neo4j/
+import/
+
+# Respostas geradas pelo pipeline. Contêm dados extraídos das notas fiscais
+# lidas do Oracle — ou seja, dados reais de clientes. Não versionar.
+respostas/
+
+node_modules/
+.env
