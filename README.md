@@ -160,6 +160,22 @@ npm start              # 4. pipeline completo
 npm run infra:down
 ```
 
+### Limpeza
+
+```bash
+npm run clean       # remove respostas/, neo4j/ e import/
+npm run clean:all   # o anterior + node_modules/ (rode npm ci depois)
+```
+
+Os dois derrubam a infra antes de apagar. O container do Neo4j escreve em
+`neo4j/` e `import/` como **root**, então um `rm -rf` do seu usuário falha com
+"Permission denied" — por isso `scripts/clean.sh` recorre a um container
+rodando como root para apagar esses dois, o que dispensa `sudo` no host. A
+imagem usada é a mesma do `docker-compose.yml`, já em cache local.
+
+`respostas/` guarda os dados extraídos das notas, então é artefato descartável e
+não versionado — vale limpar antes de compartilhar o diretório do projeto.
+
 `npm run oracle:check` é o primeiro comando a rodar quando algo falha: ele
 imprime a versão do client e do servidor, o SQL gerado e, para cada linha, o
 tamanho do BLOB e se ele começa com a assinatura `%PDF-`. Isso separa
@@ -223,6 +239,7 @@ Com `" "` os embeddings ficam melhores — nos testes os scores subiram de
 | `src/index.ts` | orquestra ingestão em lote e o loop de perguntas |
 | `src/oracleCheck.ts` | smoke test isolado do Oracle |
 | `src/ai.ts` | retrieval no Neo4j + geração da resposta |
+| `scripts/clean.sh` | remove os artefatos gerados, inclusive os root-owned do container |
 | `prompts/` | `answerPrompt.json` (role/task/instruções) e `template.txt` |
 
 Os BLOBs são entregues **um por vez** (async generator): cada PDF é processado e

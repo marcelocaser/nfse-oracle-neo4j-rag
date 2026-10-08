@@ -8,7 +8,9 @@
     "typecheck": "tsc --noEmit",
     "oracle:check": "node --env-file .env --experimental-strip-types src/oracleCheck.ts",
     "infra:up": "docker compose up -d --wait",
-    "infra:down": "docker compose down --volumes"
+    "infra:down": "docker compose down --volumes",
+    "clean": "bash scripts/clean.sh",
+    "clean:all": "bash scripts/clean.sh --all"
   },
   "keywords": [],
   "author": "erickwendel",
