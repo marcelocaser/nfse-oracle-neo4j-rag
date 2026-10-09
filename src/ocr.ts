@@ -54,17 +54,20 @@ async function renderPages(pdf: Buffer, dpi: number): Promise<Buffer[]> {
  *
  * Testado com o glm-ocr numa foto de NFS-e: depois de transcrever a página
  * inteira ele entra em loop até o Ollama abortar com "token repeat limit".
- * O texto útil vem antes; aqui colapsamos linhas repetidas em sequência.
+ * O texto útil vem antes; aqui colapsamos só a sequência repetida do FINAL.
+ *
+ * Linhas iguais seguidas no meio do texto são dados legítimos — numa NFS-e,
+ * "Deduções" e "Desconto" costumam vir como "0,00" e "0,00" — e ficam.
  */
+const MIN_REPEATED_TAIL = 3;
+
 function trimRepetition(text: string): string {
-    const lines = text.split("\n");
-    const kept: string[] = [];
-    for (const line of lines) {
-        const previous = kept.at(-1);
-        if (previous !== undefined && line.trim() && line.trim() === previous.trim()) continue;
-        kept.push(line);
-    }
-    return kept.join("\n").trim();
+    const lines = text.trimEnd().split("\n");
+    const last = lines.at(-1)?.trim();
+    let run = 0;
+    while (run < lines.length && lines[lines.length - 1 - run]!.trim() === last) run++;
+    if (run >= MIN_REPEATED_TAIL) lines.splice(lines.length - run + 1);
+    return lines.join("\n").trim();
 }
 
 /**
@@ -100,25 +103,34 @@ async function ocrImage(image: Buffer, config: OcrConfig): Promise<string> {
 
     let text = "";
     let pending = "";
+    // Erro no meio do stream chega como {"error": ...} com HTTP 200
+    // (docs.ollama.com/api/errors). Devolve true quando a geração acabou.
+    const handleLine = (line: string): boolean => {
+        if (!line.trim()) return false;
+        const message = JSON.parse(line);
+        if (message.error) {
+            // Repetição no fim da página é esperada; qualquer outro erro
+            // (modelo ausente, servidor fora) precisa aparecer.
+            if (!String(message.error).includes("repeat")) {
+                throw new Error(`OCR (${config.model}) falhou: ${message.error}`);
+            }
+            return true;
+        }
+        text += message.message?.content ?? "";
+        return false;
+    };
+
     const decoder = new TextDecoder();
     for await (const chunk of response.body) {
         pending += decoder.decode(chunk as Uint8Array, { stream: true });
         const lines = pending.split("\n");
         pending = lines.pop()!;
         for (const line of lines) {
-            if (!line.trim()) continue;
-            const message = JSON.parse(line);
-            if (message.error) {
-                // Repetição no fim da página é esperada; qualquer outro erro
-                // (modelo ausente, servidor fora) precisa aparecer.
-                if (!String(message.error).includes("repeat")) {
-                    throw new Error(`OCR (${config.model}) falhou: ${message.error}`);
-                }
-                return trimRepetition(text);
-            }
-            text += message.message?.content ?? "";
+            if (handleLine(line)) return trimRepetition(text);
         }
     }
+    // A última linha pode chegar sem "\n" — inclusive um erro.
+    handleLine(pending + decoder.decode());
     return trimRepetition(text);
 }
 
