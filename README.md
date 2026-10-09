@@ -180,6 +180,40 @@ pontuais (`Clientica` por `Cientifica`). Só a ingestão fica mais lenta — as
 perguntas não mudam. O OCR é só da ingestão: as imagens são criadas num
 diretório temporário e apagadas em seguida.
 
+#### GPU com pouca VRAM (ex.: 4 GB)
+
+Por padrão o Ollama mantém até 3 modelos carregados ao mesmo tempo. Numa GPU
+de 4 GB, se o `embeddinggemma` carregar antes do OCR, o `glm-ocr` não cabe
+inteiro e roda parte na CPU. Com `OLLAMA_MAX_LOADED_MODELS=1` o Ollama troca
+os modelos em vez de dividi-los, e cada um usa a GPU inteira:
+
+```bash
+sudo systemctl edit ollama
+```
+
+```ini
+[Service]
+Environment="OLLAMA_MAX_LOADED_MODELS=1"
+```
+
+```bash
+sudo systemctl daemon-reload && sudo systemctl restart ollama
+systemctl show ollama -p Environment | tr ' ' '\n' | grep MAX_LOADED   # confere
+```
+
+Medido numa GTX 1650 (4 GB):
+
+| Cenário | Padrão (3 modelos) | `OLLAMA_MAX_LOADED_MODELS=1` |
+| ------- | ------------------ | ---------------------------- |
+| OCR por página | ~50 s (`glm-ocr` 39% na CPU) | **~30 s** (100% GPU) |
+| Pipeline completo com OCR, `gemma4:cloud` | ~326 s | **~210 s** |
+| Pipeline sem OCR, LLM local `gemma4-e2b-8k` | ~107 s | ~123 s |
+
+Com LLM local, cada pergunta alterna `embeddinggemma` (busca) e `gemma4`
+(resposta) na memória — cerca de 3 s a mais por pergunta. Para desfazer:
+`sudo rm /etc/systemd/system/ollama.service.d/override.conf` e repita o
+`daemon-reload` e o `restart`.
+
 ### 4. Tabela com os PDFs
 
 Qualquer tabela com um identificador, um nome e uma coluna `BLOB`. O exemplo
@@ -315,12 +349,13 @@ Com `" "` os embeddings ficam melhores — nos testes os scores subiram de
 | `401 Unauthorized` no LLM | servidor local não logado: rode `ollama signin` (ou, chamando `https://ollama.com/v1` direto, `OLLAMA_API_KEY` ausente/inválida) |
 | Resposta vazia com LLM local | modelo com *thinking* gastou o `maxTokens`: defina `LLM_REASONING_EFFORT=none` |
 | `model "embeddinggemma" not found` | rode `ollama pull embeddinggemma` |
+| `Unsupported authentication token, missing key credentials` (Neo4j) | `NEO4J_USER` ou `NEO4J_PASSWORD` vazio no `.env`. Cuidado com `NEO4J_USER= ` (só espaço): o `--env-file` do Node engole a linha seguinte e a senha some |
 | `ECONNREFUSED 127.0.0.1:11434` | serviço do Ollama parado: `sudo systemctl start ollama` |
 | `The provided embedding function and vector index dimensions do not match` | o índice `tensors_index` foi criado com outro modelo de embeddings (ex.: MiniLM, 384 dim). Rode `npm run clean` ou, no Neo4j Browser, `DROP INDEX tensors_index` |
 | "Nenhum texto extraído" | PDF sem camada de texto e OCR desligado (`OCR_ENABLED=false`) ou sem resultado |
 | `spawn pdftoppm ENOENT` | falta o poppler-utils: `sudo apt-get install -y poppler-utils` |
 | `model "glm-ocr" not found` | rode `ollama pull glm-ocr` |
-| OCR muito lento (>60 s/página) | confira `ollama ps`: se o `glm-ocr` não estiver "100% GPU", a VRAM está disputada; reduza `OCR_DPI` |
+| OCR lento (>40 s/página) | confira `ollama ps`: se o `glm-ocr` não estiver "100% GPU", a VRAM está disputada — use `OLLAMA_MAX_LOADED_MODELS=1` (seção "GPU com pouca VRAM") ou reduza `OCR_DPI` |
 | Nenhuma linha retornada | a query filtra `DBMS_LOB.GETLENGTH(blob) > 0`; confira se os BLOBs estão realmente populados |
 
 ## Estrutura
