@@ -1,4 +1,3 @@
-import type { DataType, PretrainedModelOptions } from "@huggingface/transformers";
 import { readFileSync } from 'node:fs'
 
 const promptsFolder = './prompts';
@@ -74,29 +73,30 @@ export const CONFIG = Object.freeze({
         textNodeProperties: ["text"],
         nodeLabel: "Chunk",
     },
-    openRouter: {
+    llm: {
+        // Ollama expõe uma API compatível com a da OpenAI, então o ChatOpenAI
+        // segue o mesmo. Com o servidor local logado (`ollama signin`), modelos
+        // `:cloud` como gemma4:cloud rodam na nuvem do Ollama sem chave no código.
         nlpModel: process.env.NLP_MODEL,
-        url: "https://openrouter.ai/api/v1",
-        apiKey: process.env.OPENROUTER_API_KEY,
+        url: process.env.LLM_BASE_URL?.trim() || "http://localhost:11434/v1",
+        // O servidor local ignora a chave, mas o cliente da OpenAI exige um valor.
+        // Para chamar https://ollama.com/v1 direto, use a chave de OLLAMA_API_KEY.
+        apiKey: process.env.OLLAMA_API_KEY?.trim() || "ollama",
         // 0.3 para respostas conversacionais. Para extração estruturada, use 0:
         // com 0.3 os mesmos campos variavam entre execuções
         // (ex.: "635,62" vs "R$ 635,62", razão social truncada).
         temperature: 0.3,
         maxRetries: 2,
-        // Sem isto o ChatOpenAI pede o contexto inteiro do modelo como
-        // max_tokens (~116k), o que estoura o limite de gasto da chave no
-        // OpenRouter com HTTP 402. Também dá efeito ao max_length declarado
-        // em prompts/answerPrompt.json, que antes era só documental.
+        // Limita o tamanho da resposta. Também dá efeito ao max_length
+        // declarado em prompts/answerPrompt.json, que antes era só documental.
         maxTokens: 1024,
-        // "functionCalling" é o único método suportado pelos três modelos
-        // testados via OpenRouter (gemma-3-27b-it, nemotron-3.5-lightning,
-        // claude-haiku-4.5). "jsonMode" falha em todos; "jsonSchema" falha no
-        // nemotron.
+        // Modelos com "thinking" (ex.: gemma4 local) gastam o maxTokens no
+        // raciocínio e devolvem resposta vazia. "none" desliga o thinking na
+        // API compatível com OpenAI do Ollama. Vazio = padrão do modelo.
+        reasoningEffort: process.env.LLM_REASONING_EFFORT?.trim() || undefined,
+        // "functionCalling" envia o schema como tool, que a API compatível
+        // com OpenAI do Ollama suporta.
         structuredOutputMethod: "functionCalling" as const,
-        defaultHeaders: {
-            "HTTP-Referer": process.env.OPENROUTER_SITE_URL,
-            "X-Title": process.env.OPENROUTER_SITE_NAME,
-        }
     },
     oracle: {
         user: process.env.ORACLE_USER!,
@@ -125,10 +125,11 @@ export const CONFIG = Object.freeze({
         chunkOverlap: 200,
     },
     embedding: {
-        modelName: process.env.EMBEDDING_MODEL!,
-        pretrainedOptions: {
-            dtype: "fp32" as DataType, // Options: 'fp32' (best quality), 'fp16' (faster), 'q8', 'q4', 'q4f16' (quantized)
-        } satisfies PretrainedModelOptions,
+        // Gerado localmente pelo Ollama (`ollama pull embeddinggemma`).
+        // Trocar de modelo muda a dimensão dos vetores: apague o índice
+        // vetorial do Neo4j antes (npm run clean) e reindexe.
+        modelName: process.env.EMBEDDING_MODEL?.trim() || "embeddinggemma",
+        baseUrl: process.env.OLLAMA_HOST?.trim() || "http://localhost:11434",
     },
     similarity: {
         // 8 e não 3: a base tem ~28 chunks de 9 notas, e as perguntas agregadas

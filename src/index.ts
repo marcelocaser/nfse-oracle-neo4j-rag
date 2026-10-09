@@ -1,7 +1,6 @@
-import { HuggingFaceTransformersEmbeddings } from "@langchain/community/embeddings/huggingface_transformers";
+import { OllamaEmbeddings } from "@langchain/ollama";
 import { CONFIG } from "./config.ts";
 import { DocumentProcessor } from "./documentProcessor.ts";
-import { type PretrainedModelOptions } from "@huggingface/transformers";
 import { Neo4jVectorStore } from "@langchain/community/vectorstores/neo4j_vector";
 import { ChatOpenAI } from "@langchain/openai";
 import { AI } from "./ai.ts";
@@ -23,20 +22,23 @@ try {
 
     await oracleRepository.connect();
 
-    const embeddings = new HuggingFaceTransformersEmbeddings({
+    const embeddings = new OllamaEmbeddings({
         model: CONFIG.embedding.modelName,
-        pretrainedOptions: CONFIG.embedding.pretrainedOptions as PretrainedModelOptions
+        baseUrl: CONFIG.embedding.baseUrl,
     });
 
     const nlpModel = new ChatOpenAI({
-        temperature: CONFIG.openRouter.temperature,
-        maxRetries: CONFIG.openRouter.maxRetries,
-        maxTokens: CONFIG.openRouter.maxTokens,
-        modelName: CONFIG.openRouter.nlpModel,
-        openAIApiKey: CONFIG.openRouter.apiKey,
+        temperature: CONFIG.llm.temperature,
+        maxRetries: CONFIG.llm.maxRetries,
+        maxTokens: CONFIG.llm.maxTokens,
+        modelName: CONFIG.llm.nlpModel,
+        openAIApiKey: CONFIG.llm.apiKey,
+        // Enviado cru: o reasoningEffort do ChatOpenAI não aceita "none".
+        modelKwargs: CONFIG.llm.reasoningEffort
+            ? { reasoning_effort: CONFIG.llm.reasoningEffort }
+            : undefined,
         configuration: {
-            baseURL: CONFIG.openRouter.url,
-            defaultHeaders: CONFIG.openRouter.defaultHeaders
+            baseURL: CONFIG.llm.url,
         }
     });
 
