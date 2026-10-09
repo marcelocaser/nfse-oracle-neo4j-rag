@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import type { OcrConfig } from "./ocr.ts";
 
 const promptsFolder = './prompts';
 const promptsFiles = {
@@ -131,6 +132,24 @@ export const CONFIG = Object.freeze({
         modelName: process.env.EMBEDDING_MODEL?.trim() || "embeddinggemma",
         baseUrl: process.env.OLLAMA_HOST?.trim() || "http://localhost:11434",
     },
+    ocr: {
+        // PDFs sem camada de texto (escaneados/fotografados) passam por OCR
+        // local: `ollama pull glm-ocr` e `pdftoppm` (poppler-utils).
+        enabled: process.env.OCR_ENABLED?.trim().toLowerCase() !== "false",
+        model: process.env.OCR_MODEL?.trim() || "glm-ocr",
+        baseUrl: process.env.OLLAMA_HOST?.trim() || "http://localhost:11434",
+        // O tempo é dominado pela leitura da imagem, não pela geração. Numa
+        // foto de NFS-e A4 (GTX 1650): 150 dpi ≈ 70 s/página, 100 dpi ≈ 30 s,
+        // com os mesmos números, datas, CNPJs e valores; só nomes longos
+        // ganham erros pontuais. Suba se o OCR errar campos importantes.
+        dpi: positiveInt(process.env.OCR_DPI, 'OCR_DPI', 100),
+        // Uma página densa de NFS-e rende ~1000 tokens; o resto seria o loop
+        // de repetição do fim da página (ver src/ocr.ts).
+        maxTokensPerPage: 2000,
+        // 8192 mantém o glm-ocr 100% na GPU de 4 GB. Com 16384 metade do
+        // modelo ia para a CPU e cada página demorava ~100 s.
+        numCtx: 8192,
+    } satisfies OcrConfig,
     similarity: {
         // 8 e não 3: a base tem ~28 chunks de 9 notas, e as perguntas agregadas
         // ("quais prestadores aparecem?") precisam alcançar vários documentos.

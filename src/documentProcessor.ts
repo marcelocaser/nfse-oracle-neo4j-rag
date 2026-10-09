@@ -1,7 +1,12 @@
 import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
+import { Document } from "@langchain/core/documents";
 import { RecursiveCharacterTextSplitter } from "langchain/text_splitter";
 import { CONFIG, type TextSplitterConfig } from "./config.ts";
 import { type PdfRecord } from "./oracle.ts";
+import { ocrPdf } from "./ocr.ts";
+
+/** Abaixo disto o PDF é tratado como imagem (só lixo de layout, sem conteúdo). */
+const MIN_TEXT_LENGTH = 20;
 
 /**
  * Corrige os artefatos que o `parsedItemSeparator: " "` introduz.
@@ -48,11 +53,16 @@ export class DocumentProcessor {
         const loader = new PDFLoader(blob, {
             parsedItemSeparator: CONFIG.pdf.parsedItemSeparator,
         });
-        const rawDocuments = (await loader.load()).map(doc => {
+        let rawDocuments = (await loader.load()).map(doc => {
             doc.pageContent = normalizeExtractedText(doc.pageContent);
             return doc;
         });
         console.log(`Raw documents loaded: ${rawDocuments.length} pages from ${this.record.name}`);
+
+        const extractedLength = rawDocuments.reduce((total, doc) => total + doc.pageContent.trim().length, 0);
+        if (extractedLength < MIN_TEXT_LENGTH && CONFIG.ocr.enabled) {
+            rawDocuments = await this.loadWithOcr();
+        }
 
         const splitter = new RecursiveCharacterTextSplitter(
             this.textSplitterConfig
@@ -64,15 +74,35 @@ export class DocumentProcessor {
         // e o Neo4j não aceita propriedades aninhadas.
         // `source` é sobrescrito porque, no caminho Blob, o BufferLoader grava
         // o literal "blob" — perderíamos a rastreabilidade até a linha do Oracle.
+        const ocr = rawDocuments.some(doc => doc.metadata.ocr);
         return documents.map(doc => ({
             ...doc,
             metadata: {
                 source: this.record.sourceLabel,
                 documentName: this.record.name,
                 oracleId: this.record.id,
-                pageNumber: doc.metadata.loc?.pageNumber
+                pageNumber: doc.metadata.loc?.pageNumber,
+                // Permite filtrar ou auditar chunks vindos de OCR no Neo4j.
+                ocr,
             },
         }));
+    }
+
+    /**
+     * Sem camada de texto (PDF escaneado/fotografado): renderiza as páginas e
+     * transcreve cada uma com um modelo de visão local do Ollama. O resultado
+     * imita o formato do PDFLoader (`loc.pageNumber`) para o resto do fluxo
+     * seguir igual.
+     */
+    private async loadWithOcr(): Promise<Document[]> {
+        console.log(`🖼️  ${this.record.name} não tem texto — aplicando OCR com ${CONFIG.ocr.model}...`);
+        const pages = await ocrPdf(this.record.data, CONFIG.ocr, console.log);
+        return pages
+            .filter(page => page.text.trim())
+            .map(page => new Document({
+                pageContent: normalizeExtractedText(page.text),
+                metadata: { loc: { pageNumber: page.pageNumber }, ocr: true },
+            }));
     }
 
 }

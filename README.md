@@ -3,7 +3,7 @@
 Pipeline RAG didático:
 
 ```
-Oracle 11g (BLOB)  →  PDF → chunks  →  embeddings locais (Ollama)  →  Neo4j (índice vetorial)  →  perguntas via LLM (Ollama)
+Oracle 11g (BLOB)  →  PDF (texto ou OCR) → chunks  →  embeddings locais (Ollama)  →  Neo4j (índice vetorial)  →  perguntas via LLM (Ollama)
 ```
 
 Os PDFs **não** são lidos do disco: cada execução varre registros de uma tabela
@@ -150,6 +150,36 @@ Comparação nas 5 perguntas do exemplo (9 NFS-e, GTX 1650 4 GB):
 Em GPUs com mais VRAM, modelos maiores (`gemma4:e4b`, `gemma4:12b`) devem
 responder melhor; com 4 GB eles transbordam para a CPU e ficam lentos.
 
+#### OCR de PDFs escaneados ou fotografados
+
+PDFs sem camada de texto (foto de celular, digitalização) passam por OCR local
+com o modelo de visão `glm-ocr` — os dados não saem da máquina:
+
+```bash
+ollama pull glm-ocr                       # 2,2 GB, cabe numa GPU de 4 GB
+sudo apt-get install -y poppler-utils     # pdftoppm, renderiza as páginas
+```
+
+O OCR entra sozinho quando o PDF não rende texto: cada página vira PNG
+(`pdftoppm`), é transcrita pelo `glm-ocr` e segue o fluxo normal (chunks,
+embeddings, Neo4j). Os chunks ficam marcados com `ocr: true`:
+
+```cypher
+MATCH (c:Chunk {ocr: true}) RETURN c.documentName, c.pageNumber, c.text LIMIT 5;
+```
+
+| Variável | Default | Observação |
+| -------- | ------- | ---------- |
+| `OCR_ENABLED` | `true` | `false` volta a pular PDFs sem texto |
+| `OCR_MODEL` | `glm-ocr` | outro modelo de visão do Ollama |
+| `OCR_DPI` | `100` | 100 dpi ≈ 30 s/página; 150 dpi ≈ 70 s/página (GTX 1650) |
+
+Medido numa foto de NFS-e com 6 notas em 6 páginas: números, datas, CNPJs,
+valores e códigos de verificação saem corretos; nomes longos podem ganhar erros
+pontuais (`Clientica` por `Cientifica`). Só a ingestão fica mais lenta — as
+perguntas não mudam. O OCR é só da ingestão: as imagens são criadas num
+diretório temporário e apagadas em seguida.
+
 ### 4. Tabela com os PDFs
 
 Qualquer tabela com um identificador, um nome e uma coluna `BLOB`. O exemplo
@@ -287,7 +317,10 @@ Com `" "` os embeddings ficam melhores — nos testes os scores subiram de
 | `model "embeddinggemma" not found` | rode `ollama pull embeddinggemma` |
 | `ECONNREFUSED 127.0.0.1:11434` | serviço do Ollama parado: `sudo systemctl start ollama` |
 | `The provided embedding function and vector index dimensions do not match` | o índice `tensors_index` foi criado com outro modelo de embeddings (ex.: MiniLM, 384 dim). Rode `npm run clean` ou, no Neo4j Browser, `DROP INDEX tensors_index` |
-| "Nenhum texto extraído" | PDF escaneado, sem camada de texto — precisaria de OCR |
+| "Nenhum texto extraído" | PDF sem camada de texto e OCR desligado (`OCR_ENABLED=false`) ou sem resultado |
+| `spawn pdftoppm ENOENT` | falta o poppler-utils: `sudo apt-get install -y poppler-utils` |
+| `model "glm-ocr" not found` | rode `ollama pull glm-ocr` |
+| OCR muito lento (>60 s/página) | confira `ollama ps`: se o `glm-ocr` não estiver "100% GPU", a VRAM está disputada; reduza `OCR_DPI` |
 | Nenhuma linha retornada | a query filtra `DBMS_LOB.GETLENGTH(blob) > 0`; confira se os BLOBs estão realmente populados |
 
 ## Estrutura
@@ -297,6 +330,7 @@ Com `" "` os embeddings ficam melhores — nos testes os scores subiram de
 | `src/config.ts` | configuração centralizada, lida do `.env`, com validação dos identificadores SQL |
 | `src/oracle.ts` | Thick mode + pool + leitura dos BLOBs como `AsyncGenerator<PdfRecord>` |
 | `src/documentProcessor.ts` | BLOB → páginas de PDF → chunks, com metadata rastreável |
+| `src/ocr.ts` | OCR de PDFs sem texto: `pdftoppm` → PNG → `glm-ocr` no Ollama |
 | `src/index.ts` | orquestra ingestão em lote e o loop de perguntas |
 | `src/oracleCheck.ts` | smoke test isolado do Oracle |
 | `src/ai.ts` | retrieval no Neo4j + geração da resposta |

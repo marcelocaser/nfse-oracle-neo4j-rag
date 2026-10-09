@@ -58,7 +58,10 @@ try {
         const chunks = await documentProcessor.loadAndSplit();
 
         if (!chunks.length) {
-            console.warn(`⚠️  Nenhum texto extraído de ${record.sourceLabel} — pode ser um PDF escaneado (sem camada de texto).`);
+            console.warn(
+                `⚠️  Nenhum texto extraído de ${record.sourceLabel} — PDF sem camada de texto ` +
+                (CONFIG.ocr.enabled ? `e o OCR não reconheceu nada.` : `(OCR desligado em OCR_ENABLED).`)
+            );
             continue;
         }
 
