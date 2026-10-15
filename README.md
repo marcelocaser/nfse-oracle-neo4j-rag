@@ -341,6 +341,40 @@ O LLM e os limites vêm do `.env`. Para manter os dados locais, deixe nele
 máquina precisa estar ligada (sem suspender), com a VPN do Oracle, o Neo4j e o
 Ollama no ar.
 
+### Chat na rede local (API + Open WebUI)
+
+Para outras pessoas fazerem perguntas pelo navegador, sem `npm start`:
+
+```
+navegador (rede local) ──► Open WebUI :3000 ──► API :8000 (127.0.0.1) ──► Neo4j + Ollama
+                           login e histórico     roteador, grafo, trechos
+```
+
+```bash
+npm run serve      # 1. API de perguntas (deixe rodando)
+npm run chat:up    # 2. Open WebUI em http://<ip-desta-máquina>:3000
+npm run chat:down  #    para o Open WebUI
+```
+
+- **API (`src/server.ts`)**: formato da API da OpenAI (`/v1/models`,
+  `/v1/chat/completions`, com e sem stream) e `/health`. Exige a chave
+  `RAG_API_KEY` e só escuta em `127.0.0.1`. Atende **uma pergunta por vez**
+  (a GPU não comporta duas); até `API_MAX_QUEUE` esperam na fila, acima disso
+  a resposta é 503.
+- **Open WebUI**: o **primeiro cadastro vira administrador** e o cadastro se
+  fecha; as contas seguintes ficam pendentes até o administrador aprovar
+  (Painel de administração → Usuários). O único modelo é o `nfse`: a
+  conexão direta com o Ollama está desligada, e as tarefas de fundo (título,
+  tags, sugestões, autocompletar) também, porque ocupariam a fila da GPU.
+- A configuração do Open WebUI vem do `docker-compose.yml`
+  (`ENABLE_PERSISTENT_CONFIG=false`): ajustes feitos no painel voltam ao valor
+  do compose quando o container reinicia. Usuários e conversas ficam em
+  `open-webui/` (fora do git).
+- O Neo4j, a API e o Ollama só aceitam conexões desta máquina; na rede, só a
+  porta do Open WebUI (`WEBUI_PORT`, padrão 3000).
+- **Limitação:** cada mensagem é uma pergunta independente. Perguntas de
+  continuação ("e a outra nota?") ainda não usam o histórico da conversa.
+
 ### Limpeza
 
 ```bash
@@ -494,6 +528,7 @@ Com `" "` os embeddings ficam melhores — nos testes os scores subiram de
 | `src/index.ts` | reindexação completa (ou `SKIP_INGEST`) e o loop de perguntas |
 | `src/indexer.ts` | indexação incremental: só os PDFs ainda não processados |
 | `src/ingest.ts` | processamento de um PDF (chunks, nota, registro em `Documento`) |
+| `src/server.ts` | API de perguntas no formato da OpenAI, com fila, para o Open WebUI |
 | `src/models.ts` | criação dos embeddings e do LLM |
 | `src/oracleCheck.ts` | smoke test isolado do Oracle |
 | `src/ai.ts` | roteamento da pergunta, retrieval (grafo ou trechos) + geração da resposta |

@@ -1,9 +1,8 @@
 import { CONFIG } from "./config.ts";
 import { Neo4jVectorStore } from "@langchain/community/vectorstores/neo4j_vector";
-import { AI } from "./ai.ts";
 import { clearGraph, setupGraph } from "./graph.ts";
 import { corrigirPeloConjunto, processRecord, setupDocumentos } from "./ingest.ts";
-import { createChatModel, createEmbeddings } from "./models.ts";
+import { createAI, createChatModel, createEmbeddings } from "./models.ts";
 import { NfseExtractor } from "./nfseExtractor.ts";
 import { OraclePdfRepository } from "./oracle.ts";
 import { formatAnswerForDisk, stripCodeFences } from "./util.ts";
@@ -94,7 +93,6 @@ try {
     console.log("Starting document processing...");
 
     const embeddings = createEmbeddings();
-    const nlpModel = createChatModel();
     const structuredModel = createChatModel(0);
 
     _neo4jVectorStore = await Neo4jVectorStore.fromExistingGraph(embeddings, CONFIG.neo4j);
@@ -132,17 +130,7 @@ try {
     ];
     const questions = await loadQuestions(defaultQuestions);
 
-    const ai = new AI({
-        nlpModel,
-        debugLog: console.log,
-        vectorStore: _neo4jVectorStore,
-        promptConfig: CONFIG.promptConfig,
-        templateText: CONFIG.templateText,
-        topK: CONFIG.similarity.topK,
-        graph: extractor
-            ? { router: structuredModel, maxRows: CONFIG.extraction.maxRows }
-            : undefined,
-    });
+    const ai = createAI(_neo4jVectorStore);
 
     for (const index in questions) {
         const question = questions[index];
