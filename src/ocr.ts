@@ -6,12 +6,18 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
+/** Lado maior de uma A4 (297 mm). */
+const A4_LONG_SIDE_INCHES = 11.69;
+
 export interface OcrConfig {
     enabled: boolean;
     /** Modelo de visão do Ollama. glm-ocr: 2,2 GB, cabe numa GPU de 4 GB. */
     model: string;
     baseUrl: string;
-    /** Resolução da renderização das páginas — ver o trade-off em config.ts. */
+    /**
+     * Resolução equivalente numa página A4 — ver o trade-off em config.ts.
+     * Vira um teto de pixels: páginas maiores que A4 são reduzidas.
+     */
     dpi: number;
     /** Teto de tokens por página — ver `ocrImage`. */
     maxTokensPerPage: number;
@@ -28,13 +34,20 @@ export interface OcrPage {
  *
  * PDFs escaneados ou fotografados não têm camada de texto: cada página é só
  * uma imagem, e o pdf.js devolve "". O OCR precisa da página como imagem.
+ *
+ * O tamanho é limitado em pixels (`-scale-to`), não em dpi: fotos de celular
+ * entram no PDF com páginas de até 2× uma A4 (ex.: 1270×1797 pt), e a 100 dpi
+ * viravam 1764×2496 px — ~4000 tokens de imagem, que estouram a VRAM de 4 GB
+ * no encoder de visão (CUDA out of memory). Com o teto, toda página fica no
+ * máximo do tamanho de uma A4 no dpi configurado.
  */
 async function renderPages(pdf: Buffer, dpi: number): Promise<Buffer[]> {
     const dir = await mkdtemp(join(tmpdir(), "nfse-ocr-"));
     try {
         const pdfPath = join(dir, "doc.pdf");
         await writeFile(pdfPath, pdf);
-        await execFileAsync("pdftoppm", ["-r", String(dpi), "-png", pdfPath, join(dir, "p")]);
+        const maxSide = Math.round(A4_LONG_SIDE_INCHES * dpi);
+        await execFileAsync("pdftoppm", ["-scale-to", String(maxSide), "-png", pdfPath, join(dir, "p")]);
 
         // O pdftoppm preenche o número com zeros conforme o total de páginas
         // (p-1.png ou p-01.png), então ordenamos pelo número, não pelo nome.
@@ -67,7 +80,19 @@ function trimRepetition(text: string): string {
     let run = 0;
     while (run < lines.length && lines[lines.length - 1 - run]!.trim() === last) run++;
     if (run >= MIN_REPEATED_TAIL) lines.splice(lines.length - run + 1);
-    return lines.join("\n").trim();
+    return stripCodeFence(lines.join("\n").trim());
+}
+
+/**
+ * Remove a cerca markdown que o glm-ocr às vezes põe em volta da saída.
+ *
+ * Numa imagem sem texto (ex.: uma foto 3×4 guardada na mesma tabela das
+ * notas) ele devolve só "```markdown\n\n```" — sem isto, essa cerca vazia
+ * virava um chunk no Neo4j.
+ */
+function stripCodeFence(text: string): string {
+    const match = text.match(/^```[\w-]*\s*\n?([\s\S]*?)\n?\s*```$/);
+    return (match ? match[1]! : text).trim();
 }
 
 /**

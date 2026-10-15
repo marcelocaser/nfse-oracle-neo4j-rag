@@ -172,7 +172,7 @@ MATCH (c:Chunk {ocr: true}) RETURN c.documentName, c.pageNumber, c.text LIMIT 5;
 | -------- | ------- | ---------- |
 | `OCR_ENABLED` | `true` | `false` volta a pular PDFs sem texto |
 | `OCR_MODEL` | `glm-ocr` | outro modelo de visão do Ollama |
-| `OCR_DPI` | `100` | 100 dpi ≈ 30 s/página; 150 dpi ≈ 70 s/página (GTX 1650) |
+| `OCR_DPI` | `100` | 100 dpi ≈ 30 s/página; 150 dpi ≈ 70 s/página (GTX 1650). É o dpi de uma A4: páginas maiores (fotos de celular chegam a 2× A4) são reduzidas a esse tamanho em pixels |
 
 Medido numa foto de NFS-e com 6 notas em 6 páginas: números, datas, CNPJs,
 valores e códigos de verificação saem corretos; nomes longos podem ganhar erros
@@ -355,6 +355,7 @@ Com `" "` os embeddings ficam melhores — nos testes os scores subiram de
 | "Nenhum texto extraído" | PDF sem camada de texto e OCR desligado (`OCR_ENABLED=false`) ou sem resultado |
 | `spawn pdftoppm ENOENT` | falta o poppler-utils: `sudo apt-get install -y poppler-utils` |
 | `model "glm-ocr" not found` | rode `ollama pull glm-ocr` |
+| `OCR falhou em ...: CUDA error: out of memory` | a imagem da página não coube na VRAM. Reduza `OCR_DPI` ou use `OLLAMA_MAX_LOADED_MODELS=1`. O documento é pulado e a ingestão segue |
 | OCR lento (>40 s/página) | confira `ollama ps`: se o `glm-ocr` não estiver "100% GPU", a VRAM está disputada — use `OLLAMA_MAX_LOADED_MODELS=1` (seção "GPU com pouca VRAM") ou reduza `OCR_DPI` |
 | Nenhuma linha retornada | a query filtra `DBMS_LOB.GETLENGTH(blob) > 0`; confira se os BLOBs estão realmente populados |
 

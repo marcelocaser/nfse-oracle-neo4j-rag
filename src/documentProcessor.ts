@@ -96,7 +96,16 @@ export class DocumentProcessor {
      */
     private async loadWithOcr(): Promise<Document[]> {
         console.log(`🖼️  ${this.record.name} não tem texto — aplicando OCR com ${CONFIG.ocr.model}...`);
-        const pages = await ocrPdf(this.record.data, CONFIG.ocr, console.log);
+        let pages;
+        try {
+            pages = await ocrPdf(this.record.data, CONFIG.ocr, console.log);
+        } catch (error) {
+            // Uma página problemática não deve derrubar a ingestão inteira
+            // (num lote de 100 PDFs, um OOM no 20º perdia os 80 restantes).
+            // O documento é pulado e o motivo fica no log.
+            console.warn(`⚠️  OCR falhou em ${this.record.sourceLabel}: ${(error as Error).message}`);
+            return [];
+        }
         return pages
             .filter(page => page.text.trim())
             .map(page => new Document({

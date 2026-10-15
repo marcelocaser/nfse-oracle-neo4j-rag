@@ -142,6 +142,8 @@ export const CONFIG = Object.freeze({
         // foto de NFS-e A4 (GTX 1650): 150 dpi ≈ 70 s/página, 100 dpi ≈ 30 s,
         // com os mesmos números, datas, CNPJs e valores; só nomes longos
         // ganham erros pontuais. Suba se o OCR errar campos importantes.
+        // É o dpi de uma A4: páginas maiores são reduzidas a esse tamanho
+        // em pixels (ver renderPages em src/ocr.ts).
         dpi: positiveInt(process.env.OCR_DPI, 'OCR_DPI', 100),
         // Uma página densa de NFS-e rende ~1000 tokens; o resto seria o loop
         // de repetição do fim da página (ver src/ocr.ts).
