@@ -10,5 +10,8 @@ respostas/
 # Perguntas de teste (QUESTIONS_FILE). Costumam citar prestadores reais.
 perguntas.txt
 
+# Logs da indexação agendada. Citam prestadores e valores das notas.
+logs/
+
 node_modules/
 .env

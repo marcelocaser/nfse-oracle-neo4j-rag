@@ -130,15 +130,58 @@ export class OraclePdfRepository {
 
     /** Emite um PdfRecord por linha encontrada, sob demanda. */
     async *streamPdfs(): AsyncGenerator<PdfRecord> {
-        if (!this.pool) throw new Error("connect() precisa ser chamado antes de streamPdfs()");
+        const sql = this.buildQuery();
+        // Só manda o bind se a query o referencia: uma sobrescrita via
+        // ORACLE_PDF_QUERY sem :maxDocs falharia com ORA-01036.
+        const binds = /:maxDocs\b/.test(sql) ? { maxDocs: this.config.maxDocs } : {};
+        yield* this.streamQuery(sql, binds);
+    }
+
+    /**
+     * IDs com PDF não vazio, do mais novo para o mais antigo. Só os IDs: com
+     * ~15 mil linhas a lista é pequena e o BLOB é lido depois, um a um.
+     */
+    async listIds(options: { since?: string } = {}): Promise<string[]> {
+        if (!this.pool) throw new Error("connect() precisa ser chamado antes de listIds()");
+        const { idColumn, blobColumn, dateColumn, table } = this.config;
+        if (options.since && !dateColumn) {
+            throw new Error("INGEST_SINCE exige ORACLE_PDF_DATE_COLUMN (ex.: INCLUIDO_EM) no .env.");
+        }
+        const sql = [
+            `SELECT ${idColumn} AS ID FROM ${table}`,
+            ` WHERE ${blobColumn} IS NOT NULL`,
+            `   AND DBMS_LOB.GETLENGTH(${blobColumn}) > 0`,
+            options.since ? `   AND ${dateColumn} >= TO_DATE(:since, 'YYYY-MM-DD')` : '',
+            ` ORDER BY ${idColumn} DESC`,
+        ].filter(Boolean).join('\n');
 
         const connection = await this.pool.getConnection();
         try {
-            const sql = this.buildQuery();
-            // Só manda o bind se a query o referencia: uma sobrescrita via
-            // ORACLE_PDF_QUERY sem :maxDocs falharia com ORA-01036.
-            const binds = /:maxDocs\b/.test(sql) ? { maxDocs: this.config.maxDocs } : {};
+            const result = await connection.execute<{ ID: unknown }>(
+                sql,
+                options.since ? { since: options.since } : {},
+                { outFormat: oracledb.OUT_FORMAT_OBJECT, maxRows: 0 }
+            );
+            return (result.rows ?? []).map(row => String(row.ID));
+        } finally {
+            await connection.close();
+        }
+    }
 
+    /** Lê os PDFs dos IDs informados, um por vez e na ordem dada. */
+    async *streamPdfsByIds(ids: Iterable<string>): AsyncGenerator<PdfRecord> {
+        const { idColumn, nameColumn, blobColumn, table } = this.config;
+        const sql = `SELECT ${idColumn} AS ID, ${nameColumn} AS NAME, ${blobColumn} AS DATA FROM ${table} WHERE ${idColumn} = :id`;
+        for (const id of ids) {
+            yield* this.streamQuery(sql, { id });
+        }
+    }
+
+    private async *streamQuery(sql: string, binds: oracledb.BindParameters): AsyncGenerator<PdfRecord> {
+        if (!this.pool) throw new Error("connect() precisa ser chamado antes de ler os PDFs");
+
+        const connection = await this.pool.getConnection();
+        try {
             const result = await connection.execute<PdfRow>(
                 sql,
                 binds,

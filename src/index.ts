@@ -1,10 +1,9 @@
-import { OllamaEmbeddings } from "@langchain/ollama";
 import { CONFIG } from "./config.ts";
-import { DocumentProcessor } from "./documentProcessor.ts";
 import { Neo4jVectorStore } from "@langchain/community/vectorstores/neo4j_vector";
-import { ChatOpenAI } from "@langchain/openai";
 import { AI } from "./ai.ts";
-import { clearGraph, consolidarEmpresas, corrigirPapeisPeloConjunto, saveNota, setupGraph } from "./graph.ts";
+import { clearGraph, setupGraph } from "./graph.ts";
+import { corrigirPeloConjunto, processRecord, setupDocumentos } from "./ingest.ts";
+import { createChatModel, createEmbeddings } from "./models.ts";
 import { NfseExtractor } from "./nfseExtractor.ts";
 import { OraclePdfRepository } from "./oracle.ts";
 import { formatAnswerForDisk, stripCodeFences } from "./util.ts";
@@ -51,50 +50,16 @@ async function ingest(vectorStore: Neo4jVectorStore, extractor: NfseExtractor | 
     await clearAll(vectorStore, CONFIG.neo4j.nodeLabel);
     await clearGraph(vectorStore);
     await setupGraph(vectorStore);
-    let notaCount = 0;
+    await setupDocumentos(vectorStore);
 
     let documentCount = 0;
     let chunkCount = 0;
 
     for await (const record of oracleRepository.streamPdfs()) {
-        console.log(`\n📥 ${record.sourceLabel} (${record.name}, ${(record.data.length / 1024).toFixed(0)} KB)`);
-
-        const documentProcessor = new DocumentProcessor(record, CONFIG.textSplitter);
-        const chunks = await documentProcessor.loadAndSplit();
-
-        if (!chunks.length) {
-            console.warn(
-                `⚠️  Nenhum texto extraído de ${record.sourceLabel} — PDF sem camada de texto ` +
-                (CONFIG.ocr.enabled ? `e o OCR não reconheceu nada.` : `(OCR desligado em OCR_ENABLED).`)
-            );
-            continue;
-        }
-
-        await vectorStore.addDocuments(chunks);
+        const { chunks } = await processRecord(vectorStore, extractor, record);
+        if (!chunks) continue;
         documentCount++;
-        chunkCount += chunks.length;
-        console.log(`✅ ${chunks.length} chunks indexados no Neo4j.`);
-
-        if (extractor) {
-            try {
-                const started = Date.now();
-                const { nota, descartes } = await extractor.extract(documentProcessor.fullText);
-                for (const motivo of descartes) console.log(`   ↳ ${motivo}`);
-                if (nota) {
-                    await saveNota(vectorStore, record, nota);
-                    notaCount++;
-                    console.log(
-                        `🕸️  Nota ${nota.numero ?? "?"} no grafo (${((Date.now() - started) / 1000).toFixed(0)} s): ` +
-                        `prestador ${nota.prestador.nome ?? "?"}, valor ${nota.valorTotal ?? "?"}, ` +
-                        `ISS retido ${nota.issRetido ?? "-"}, IRRF retido ${nota.irrfRetido ?? "-"}`
-                    );
-                }
-            } catch (error) {
-                // A extração enriquece o grafo; os chunks já estão salvos e a
-                // busca nos trechos continua funcionando para este documento.
-                console.warn(`⚠️  Extração falhou em ${record.sourceLabel}: ${(error as Error).message}`);
-            }
-        }
+        chunkCount += chunks;
     }
 
     if (documentCount === 0) {
@@ -105,14 +70,7 @@ async function ingest(vectorStore: Neo4jVectorStore, extractor: NfseExtractor | 
     }
 
     console.log(`\n📚 Total: ${chunkCount} chunks de ${documentCount} documento(s) do Oracle.`);
-    if (extractor) {
-        const corrigidas = await corrigirPapeisPeloConjunto(vectorStore);
-        const { nomesRemovidos, unidas } = await consolidarEmpresas(vectorStore);
-        console.log(
-            `🕸️  ${notaCount} NFS-e no grafo. Correções pelo conjunto: ${corrigidas} nota(s) com prestador/tomador ` +
-            `trocados, ${nomesRemovidos} nome(s) de empresa removidos de outro CNPJ, ${unidas} empresa(s) sem CNPJ unida(s).`
-        );
-    }
+    if (extractor) await corrigirPeloConjunto(vectorStore);
 }
 
 /** Com SKIP_INGEST, confere que há uma indexação anterior para responder. */
@@ -135,41 +93,9 @@ async function checkExistingIndex(vectorStore: Neo4jVectorStore) {
 try {
     console.log("Starting document processing...");
 
-    const embeddings = new OllamaEmbeddings({
-        model: CONFIG.embedding.modelName,
-        baseUrl: CONFIG.embedding.baseUrl,
-    });
-
-    const nlpModel = new ChatOpenAI({
-        temperature: CONFIG.llm.temperature,
-        maxRetries: CONFIG.llm.maxRetries,
-        maxTokens: CONFIG.llm.maxTokens,
-        modelName: CONFIG.llm.nlpModel,
-        openAIApiKey: CONFIG.llm.apiKey,
-        // Enviado cru: o reasoningEffort do ChatOpenAI não aceita "none".
-        modelKwargs: CONFIG.llm.reasoningEffort
-            ? { reasoning_effort: CONFIG.llm.reasoningEffort }
-            : undefined,
-        configuration: {
-            baseURL: CONFIG.llm.url,
-        }
-    });
-
-    // Temperatura 0 para extração e roteamento: com 0.3 os mesmos campos
-    // variavam entre execuções.
-    const structuredModel = new ChatOpenAI({
-        temperature: 0,
-        maxRetries: CONFIG.llm.maxRetries,
-        maxTokens: CONFIG.llm.maxTokens,
-        modelName: CONFIG.llm.nlpModel,
-        openAIApiKey: CONFIG.llm.apiKey,
-        modelKwargs: CONFIG.llm.reasoningEffort
-            ? { reasoning_effort: CONFIG.llm.reasoningEffort }
-            : undefined,
-        configuration: {
-            baseURL: CONFIG.llm.url,
-        }
-    });
+    const embeddings = createEmbeddings();
+    const nlpModel = createChatModel();
+    const structuredModel = createChatModel(0);
 
     _neo4jVectorStore = await Neo4jVectorStore.fromExistingGraph(embeddings, CONFIG.neo4j);
 
