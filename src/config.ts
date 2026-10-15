@@ -64,6 +64,10 @@ export const CONFIG = Object.freeze({
     output: {
         answersFolder: './respostas',
         fileName: 'resposta',
+        // Perguntas a responder, uma por linha (# comenta). Fica fora do git
+        // porque costuma citar prestadores reais. Sem o arquivo, valem as
+        // perguntas padrão de src/index.ts.
+        questionsFile: process.env.QUESTIONS_FILE?.trim() || './perguntas.txt',
     },
     neo4j: {
         url: process.env.NEO4J_URI!,

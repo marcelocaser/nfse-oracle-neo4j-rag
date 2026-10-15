@@ -7,5 +7,8 @@ import/
 # lidas do Oracle — ou seja, dados reais de clientes. Não versionar.
 respostas/
 
+# Perguntas de teste (QUESTIONS_FILE). Costumam citar prestadores reais.
+perguntas.txt
+
 node_modules/
 .env

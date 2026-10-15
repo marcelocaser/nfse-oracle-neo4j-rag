@@ -8,10 +8,30 @@ import { clearGraph, consolidarEmpresas, corrigirPapeisPeloConjunto, saveNota, s
 import { NfseExtractor } from "./nfseExtractor.ts";
 import { OraclePdfRepository } from "./oracle.ts";
 import { formatAnswerForDisk, stripCodeFences } from "./util.ts";
-import { writeFile, mkdir } from 'node:fs/promises'
+import { writeFile, mkdir, readFile } from 'node:fs/promises'
 
 let _neo4jVectorStore: any = null;
 const oracleRepository = new OraclePdfRepository(CONFIG.oracle);
+
+/**
+ * Lê as perguntas de CONFIG.output.questionsFile: uma por linha, ignorando
+ * linhas vazias e comentários (#). Sem o arquivo, usa as perguntas padrão.
+ */
+async function loadQuestions(defaults: string[]): Promise<string[]> {
+    const file = CONFIG.output.questionsFile;
+    let text: string;
+    try {
+        text = await readFile(file, 'utf8');
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        console.log(`❓ ${file} não existe — usando as ${defaults.length} perguntas padrão.`);
+        return defaults;
+    }
+    const questions = text.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+    if (!questions.length) throw new Error(`${file} não tem perguntas (linhas vazias e com # são ignoradas).`);
+    console.log(`❓ ${questions.length} pergunta(s) lida(s) de ${file}.`);
+    return questions;
+}
 
 async function clearAll(vectorStore: Neo4jVectorStore, modelLabel: string) {
     console.log(`Clearing all nodes with label: ${modelLabel}`);
@@ -174,16 +194,17 @@ try {
     // Com o grafo (EXTRACTION_ENABLED), as agregadas são respondidas por Cypher
     // sobre todas as notas. Sem ele, ficam limitadas por topK: só os chunks
     // recuperados são vistos, e a resposta cobre parte do acervo.
-    const questions = [
+    const defaultQuestions = [
         "Quais prestadores de serviço aparecem nas notas e quais são os CNPJs de cada um?",
         "Em quais municípios e UFs os serviços foram prestados?",
         "Que tipos de serviço aparecem nas notas, como comissão, premiação ou propaganda?",
-        // Troque "ACME REPRESENTACOES" pelo nome de um prestador que exista na
-        // sua base: identificar a nota na própria pergunta é o que faz a busca
-        // vetorial trazer os chunks daquele documento específico.
+        // Nome de exemplo: em perguntas.txt, troque pelo de um prestador da sua
+        // base. Identificar a nota na própria pergunta é o que leva a consulta
+        // ao grafo (ou a busca nos trechos) àquele documento específico.
         "Na nota do prestador ACME REPRESENTACOES, qual é o valor do serviço e a data de emissão?",
         "Alguma das notas apresenta retenção de ISSQN ou de tributos federais? Em quais valores?"
     ];
+    const questions = await loadQuestions(defaultQuestions);
 
     const ai = new AI({
         nlpModel,

@@ -291,8 +291,11 @@ sobre o que já está no Neo4j, sem Oracle nem VPN:
 SKIP_INGEST=true npm start
 ```
 
-As perguntas ficam em `src/index.ts` (array `questions`) e cada resposta vai
-para `respostas/resposta-<nº>-<timestamp>.md`. Não rode as duas formas ao mesmo
+As perguntas são lidas de `perguntas.txt` (ou do arquivo em `QUESTIONS_FILE`),
+uma por linha; linhas vazias e começadas com `#` são ignoradas. O arquivo está
+no `.gitignore` porque costuma citar prestadores reais. Sem ele, valem as
+perguntas padrão de `src/index.ts`. Cada resposta vai para
+`respostas/resposta-<nº>-<timestamp>.md`, com o nº na ordem do arquivo. Não rode as duas formas ao mesmo
 tempo: a reindexação apaga o grafo que a outra está consultando.
 
 ### Limpeza
