@@ -8,6 +8,7 @@
     "index": "node --env-file .env --experimental-strip-types src/indexer.ts",
     "index:schedule": "bash scripts/agendar.sh",
     "serve": "node --env-file .env --experimental-strip-types src/server.ts",
+    "api:service": "bash scripts/servico-api.sh",
     "chat:up": "docker compose --profile chat up -d --wait",
     "chat:down": "docker compose --profile chat stop open-webui",
     "typecheck": "tsc --noEmit",

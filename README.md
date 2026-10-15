@@ -372,6 +372,19 @@ npm run chat:down  #    para o Open WebUI
   `open-webui/` (fora do git).
 - O Neo4j, a API e o Ollama só aceitam conexões desta máquina; na rede, só a
   porta do Open WebUI (`WEBUI_PORT`, padrão 3000).
+- **API como serviço** (sobe com a máquina e reinicia sozinha se cair):
+
+  ```bash
+  npm run api:service                  # instala/atualiza e inicia (systemd do usuário)
+  npm run api:service -- --status
+  npm run api:service -- --remover
+  journalctl --user -u nfse-api -f     # log
+  sudo loginctl enable-linger $USER    # uma vez: sobe no boot sem ninguém logado
+  ```
+
+  O Open WebUI e o Neo4j sobem com o Docker (`restart: unless-stopped`), e o
+  Ollama já é um serviço do sistema. Com o serviço instalado, não rode
+  `npm run serve` ao mesmo tempo: a porta 8000 estará ocupada.
 - **Limitação:** cada mensagem é uma pergunta independente. Perguntas de
   continuação ("e a outra nota?") ainda não usam o histórico da conversa.
 
@@ -535,6 +548,7 @@ Com `" "` os embeddings ficam melhores — nos testes os scores subiram de
 | `src/nfseSchema.ts` | campos extraídos de cada NFS-e |
 | `src/nfseExtractor.ts` | extração com o LLM + validação de CNPJ, valores, datas e retenções contra o texto |
 | `src/graph.ts` | grafo `Empresa`/`Nota`, gravação e as consultas Cypher de cada rota |
+| `scripts/serve.sh` / `scripts/servico-api.sh` | sobe a API com o Node do nvm e a instala como serviço do systemd |
 | `scripts/indexar.sh` / `scripts/agendar.sh` | rodada agendada (ambiente do cron, trava, logs) e instalação no crontab |
 | `scripts/clean.sh` | remove os artefatos gerados, inclusive os root-owned do container |
 | `ollama/` | Modelfile do LLM local com contexto de 8192 tokens |
