@@ -129,10 +129,23 @@ function formatarDocumento(d: string): string | null {
     return null;
 }
 
+/**
+ * Valor no formato que o OCR às vezes produz: "1.214.88" (vírgula decimal lida
+ * como ponto). Não é ambíguo — grupos de milhar têm 3 dígitos, então os 2
+ * finais só podem ser os centavos.
+ */
+const VALOR_OCR = /(?<![\d.,])(\d{1,3}(?:\.\d{3})+)\.(\d{2})(?![\d.,])/g;
+
+/** Reescreve "1.214.88" como "1.214,88" para os valores do OCR baterem com os do LLM. */
+function normalizarValoresOcr(text: string): string {
+    return text.replace(VALOR_OCR, "$1,$2");
+}
+
 /** Converte "R$ 1.234,56" em 1234.56. Devolve null se não for um valor monetário. */
 export function parseValor(value: string | null): number | null {
     if (!value) return null;
-    const clean = value.replace(/R\$|\s/g, "");
+    // "RS" é o "R$" lido pelo OCR.
+    const clean = normalizarValoresOcr(value.replace(/R\$|\bRS\b|\s/gi, ""));
     if (/^\d{1,3}(\.\d{3})*,\d{2}$|^\d+,\d{2}$/.test(clean)) return Number(clean.replace(/\./g, "").replace(",", "."));
     if (/^\d+(\.\d{2})?$/.test(clean)) return Number(clean);
     return null;
@@ -286,12 +299,15 @@ function limitarAliquota(valor: number | null, total: number | null, maximo: num
     return null;
 }
 
+const MAX_DIGITOS_NUMERO = 15;
+
 /** Validação pura (sem LLM) — exportada para teste. */
 export function validarCampos(campos: NfseFields, texto: string): ExtractionResult {
     const descartes: string[] = [];
     if (!campos.e_nfse) return { nota: null, descartes: ["documento não é uma NFS-e"] };
 
-    const textoCompacto = compact(texto);
+    // Valores do OCR ("1.214.88") no formato usual, para conferir presença.
+    const textoCompacto = compact(normalizarValoresOcr(texto));
     const textoDigitos = digits(texto);
     const aparece = (v: string | null) => !!v && textoCompacto.toUpperCase().includes(compact(v).toUpperCase());
 
@@ -304,8 +320,15 @@ export function validarCampos(campos: NfseFields, texto: string): ExtractionResu
     if (campos.data_emissao && !dataOk) descartes.push(`data_emissao "${campos.data_emissao}": não aparece no texto`);
 
     const numero = campos.numero_nota?.trim() || null;
-    const numeroOk = numero && aparece(numero) ? numero : null;
+    let numeroOk = numero && aparece(numero) ? numero : null;
     if (numero && !numeroOk) descartes.push(`numero_nota "${numero}": não aparece no texto`);
+    // No layout nacional o número às vezes não sai na extração de texto e o
+    // LLM devolve a chave de acesso (50 dígitos). Números de NFS-e vistos no
+    // acervo têm até 15 dígitos (ex.: ano + sequencial).
+    if (numeroOk && digits(numeroOk).length > MAX_DIGITOS_NUMERO) {
+        descartes.push(`numero_nota "${numeroOk}": ${digits(numeroOk).length} dígitos, parece a chave de acesso`);
+        numeroOk = null;
+    }
 
     const prestadorNome = resolverNome(campos.prestador_razao_social, aparece, descartes, "prestador");
     const tomadorNome = resolverNome(campos.tomador_razao_social, aparece, descartes, "tomador");

@@ -24,11 +24,11 @@ const started = Date.now();
 const minutos = () => (Date.now() - started) / 60_000;
 
 try {
-    const { maxMinutes, maxDocs, since } = CONFIG.ingest;
+    const { maxMinutes, maxDocs, since, reprocess } = CONFIG.ingest;
     console.log(
         `🗓️  Indexação incremental — ${new Date().toLocaleString("pt-BR")} — LLM ${CONFIG.llm.nlpModel}, ` +
         `limite ${maxMinutes} min` + (Number.isFinite(maxDocs) ? ` / ${maxDocs} documento(s)` : "") +
-        (since ? `, incluídos desde ${since}` : "")
+        (reprocess.length ? `, reprocessando ${reprocess.length} ID(s) informado(s)` : since ? `, incluídos desde ${since}` : "")
     );
 
     await oracleRepository.connect();
@@ -37,7 +37,11 @@ try {
     await setupDocumentos(store);
 
     const feitos = await processedIds(store);
-    const pendentes = (await oracleRepository.listIds({ since })).filter(id => !feitos.has(id));
+    // Com INGEST_REPROCESS, só os IDs pedidos — já indexados ou não. O
+    // processRecord apaga os chunks e a nota antigos antes de gravar.
+    const pendentes = reprocess.length
+        ? reprocess
+        : (await oracleRepository.listIds({ since })).filter(id => !feitos.has(id));
     console.log(`📋 ${pendentes.length} documento(s) pendente(s); ${feitos.size} já processado(s).`);
 
     const extractor = CONFIG.extraction.enabled

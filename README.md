@@ -313,6 +313,9 @@ apagar nada:
   O documento em andamento termina; o resto fica para a próxima rodada.
   `INGEST_SINCE=aaaa-mm-dd` limita o acervo pela data de inclusão
   (`ORACLE_PDF_DATE_COLUMN`).
+- **Reprocessar documentos já indexados** (ex.: depois de corrigir o extrator):
+  `INGEST_REPROCESS=15027,15032 bash scripts/indexar.sh`. A rodada processa só
+  esses IDs e substitui os chunks e a nota antigos.
 - **Todo documento processado é registrado** em `(:Documento {oracleId, status})`,
   inclusive os que não viraram nota (`sem_texto`, `nao_nfse`, `falha_extracao`),
   para não serem tentados de novo a cada rodada.
