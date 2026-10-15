@@ -283,6 +283,18 @@ npm start              # 4. pipeline completo
 npm run infra:down
 ```
 
+O `npm start` sempre reindexa do zero: apaga chunks e grafo e relê os PDFs do
+Oracle (~45 min para 100 PDFs com o LLM local). Para refazer só as perguntas
+sobre o que já está no Neo4j, sem Oracle nem VPN:
+
+```bash
+SKIP_INGEST=true npm start
+```
+
+As perguntas ficam em `src/index.ts` (array `questions`) e cada resposta vai
+para `respostas/resposta-<nº>-<timestamp>.md`. Não rode as duas formas ao mesmo
+tempo: a reindexação apaga o grafo que a outra está consultando.
+
 ### Limpeza
 
 ```bash

@@ -166,6 +166,12 @@ export const CONFIG = Object.freeze({
         // Linhas do grafo levadas ao contexto da resposta.
         maxRows: 60,
     },
+    ingest: {
+        // "true" pula Oracle, OCR e extração e só responde às perguntas sobre o
+        // que já está no Neo4j: segundos em vez dos ~45 min de reindexar 100
+        // PDFs. Útil para testar prompts, rotas e perguntas.
+        skip: process.env.SKIP_INGEST?.trim().toLowerCase() === "true",
+    },
     similarity: {
         // 8 e não 3: a base tem ~28 chunks de 9 notas, e as perguntas agregadas
         // ("quais prestadores aparecem?") precisam alcançar vários documentos.
