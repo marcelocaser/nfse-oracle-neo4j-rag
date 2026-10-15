@@ -351,7 +351,7 @@ navegador (rede local) ──► Open WebUI :3000 ──► API :8000 (127.0.0.1
 ```
 
 ```bash
-npm run serve      # 1. API de perguntas (deixe rodando)
+npm run serve      # 1. API de perguntas (deixe rodando) — ou instale como serviço, abaixo
 npm run chat:up    # 2. Open WebUI em http://<ip-desta-máquina>:3000
 npm run chat:down  #    para o Open WebUI
 ```
@@ -375,16 +375,29 @@ npm run chat:down  #    para o Open WebUI
 - **API como serviço** (sobe com a máquina e reinicia sozinha se cair):
 
   ```bash
-  npm run api:service                  # instala/atualiza e inicia (systemd do usuário)
-  npm run api:service -- --status
-  npm run api:service -- --remover
-  journalctl --user -u nfse-api -f     # log
-  sudo loginctl enable-linger $USER    # uma vez: sobe no boot sem ninguém logado
+  npm run api:service                  # instala/atualiza e (re)inicia (systemd do usuário)
+  npm run api:service -- --status      # estado e últimas linhas do log
+  npm run api:service -- --remover     # para e remove o serviço
+  journalctl --user -u nfse-api -f     # log ao vivo das perguntas
   ```
 
-  O Open WebUI e o Neo4j sobem com o Docker (`restart: unless-stopped`), e o
-  Ollama já é um serviço do sistema. Com o serviço instalado, não rode
-  `npm run serve` ao mesmo tempo: a porta 8000 estará ocupada.
+  A API lê o código e o `.env` só ao iniciar: depois de um `git pull` ou de
+  mudar o `.env`, rode `npm run api:service` de novo para reiniciá-la.
+
+  Sem *linger*, o serviço do usuário só sobe quando você faz login. Para subir
+  no boot mesmo sem ninguém logado, rode uma vez (pede sudo):
+
+  ```bash
+  sudo loginctl enable-linger $USER
+  loginctl show-user $USER -p Linger   # confere: Linger=yes
+  ```
+
+  Depois de reiniciar a máquina, tudo volta sozinho: o Ollama é um serviço do
+  sistema, o Neo4j e o Open WebUI sobem com o Docker
+  (`restart: unless-stopped`) e a API com o serviço `nfse-api`. A VPN do
+  Oracle não sobe sozinha, mas o chat não precisa dela — só a indexação.
+  Com o serviço instalado, não rode `npm run serve` ao mesmo tempo: a porta
+  8000 estará ocupada.
 - **Limitação:** cada mensagem é uma pergunta independente. Perguntas de
   continuação ("e a outra nota?") ainda não usam o histórico da conversa.
 
