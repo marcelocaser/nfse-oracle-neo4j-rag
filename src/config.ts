@@ -70,7 +70,11 @@ export const CONFIG = Object.freeze({
         username: process.env.NEO4J_USER!,
         password: process.env.NEO4J_PASSWORD!,
         indexName: "tensors_index",
-        searchType: "vector" as const,
+        // "hybrid" soma a busca por palavra-chave (índice FULLTEXT) à vetorial:
+        // ajuda perguntas com termos exatos (CNPJ, "Retido", nome de empresa).
+        // Os scores dos dois lados são normalizados pelo maior de cada um.
+        searchType: (process.env.SEARCH_TYPE?.trim() === "vector" ? "vector" : "hybrid") as "vector" | "hybrid",
+        keywordIndexName: "chunk_keyword_index",
         textNodeProperties: ["text"],
         nodeLabel: "Chunk",
     },
@@ -152,6 +156,16 @@ export const CONFIG = Object.freeze({
         // modelo ia para a CPU e cada página demorava ~100 s.
         numCtx: 8192,
     } satisfies OcrConfig,
+    extraction: {
+        // Extrai os campos de cada NFS-e na ingestão e monta o grafo
+        // (Empresa)-[:PRESTOU]->(Nota). ~8–12 s por documento com o LLM local.
+        enabled: process.env.EXTRACTION_ENABLED?.trim().toLowerCase() !== "false",
+        // ~4K tokens: cabe no contexto de 8K do gemma4-e2b-8k com o schema e a
+        // resposta. Os campos de uma NFS-e ficam no início do documento.
+        maxChars: 12000,
+        // Linhas do grafo levadas ao contexto da resposta.
+        maxRows: 60,
+    },
     similarity: {
         // 8 e não 3: a base tem ~28 chunks de 9 notas, e as perguntas agregadas
         // ("quais prestadores aparecem?") precisam alcançar vários documentos.

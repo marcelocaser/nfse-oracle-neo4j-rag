@@ -4,6 +4,8 @@ import { DocumentProcessor } from "./documentProcessor.ts";
 import { Neo4jVectorStore } from "@langchain/community/vectorstores/neo4j_vector";
 import { ChatOpenAI } from "@langchain/openai";
 import { AI } from "./ai.ts";
+import { clearGraph, consolidarEmpresas, corrigirPapeisPeloConjunto, saveNota, setupGraph } from "./graph.ts";
+import { NfseExtractor } from "./nfseExtractor.ts";
 import { OraclePdfRepository } from "./oracle.ts";
 import { formatAnswerForDisk, stripCodeFences } from "./util.ts";
 import { writeFile, mkdir } from 'node:fs/promises'
@@ -42,11 +44,33 @@ try {
         }
     });
 
+    // Temperatura 0 para extração e roteamento: com 0.3 os mesmos campos
+    // variavam entre execuções.
+    const structuredModel = new ChatOpenAI({
+        temperature: 0,
+        maxRetries: CONFIG.llm.maxRetries,
+        maxTokens: CONFIG.llm.maxTokens,
+        modelName: CONFIG.llm.nlpModel,
+        openAIApiKey: CONFIG.llm.apiKey,
+        modelKwargs: CONFIG.llm.reasoningEffort
+            ? { reasoning_effort: CONFIG.llm.reasoningEffort }
+            : undefined,
+        configuration: {
+            baseURL: CONFIG.llm.url,
+        }
+    });
+
     _neo4jVectorStore = await Neo4jVectorStore.fromExistingGraph(embeddings, CONFIG.neo4j);
 
     // Precisa de await: sem ele o DETACH DELETE corre em paralelo com o
     // addDocuments abaixo e pode apagar os chunks recém-inseridos.
     await clearAll(_neo4jVectorStore, CONFIG.neo4j.nodeLabel);
+    await clearGraph(_neo4jVectorStore);
+    await setupGraph(_neo4jVectorStore);
+    const extractor = CONFIG.extraction.enabled
+        ? new NfseExtractor(structuredModel, CONFIG.extraction.maxChars)
+        : null;
+    let notaCount = 0;
 
     let documentCount = 0;
     let chunkCount = 0;
@@ -69,6 +93,27 @@ try {
         documentCount++;
         chunkCount += chunks.length;
         console.log(`✅ ${chunks.length} chunks indexados no Neo4j.`);
+
+        if (extractor) {
+            try {
+                const started = Date.now();
+                const { nota, descartes } = await extractor.extract(documentProcessor.fullText);
+                for (const motivo of descartes) console.log(`   ↳ ${motivo}`);
+                if (nota) {
+                    await saveNota(_neo4jVectorStore, record, nota);
+                    notaCount++;
+                    console.log(
+                        `🕸️  Nota ${nota.numero ?? "?"} no grafo (${((Date.now() - started) / 1000).toFixed(0)} s): ` +
+                        `prestador ${nota.prestador.nome ?? "?"}, valor ${nota.valorTotal ?? "?"}, ` +
+                        `ISS retido ${nota.issRetido ?? "-"}, IRRF retido ${nota.irrfRetido ?? "-"}`
+                    );
+                }
+            } catch (error) {
+                // A extração enriquece o grafo; os chunks já estão salvos e a
+                // busca nos trechos continua funcionando para este documento.
+                console.warn(`⚠️  Extração falhou em ${record.sourceLabel}: ${(error as Error).message}`);
+            }
+        }
     }
 
     if (documentCount === 0) {
@@ -79,6 +124,14 @@ try {
     }
 
     console.log(`\n📚 Total: ${chunkCount} chunks de ${documentCount} documento(s) do Oracle.`);
+    if (extractor) {
+        const corrigidas = await corrigirPapeisPeloConjunto(_neo4jVectorStore);
+        const { nomesRemovidos, unidas } = await consolidarEmpresas(_neo4jVectorStore);
+        console.log(
+            `🕸️  ${notaCount} NFS-e no grafo. Correções pelo conjunto: ${corrigidas} nota(s) com prestador/tomador ` +
+            `trocados, ${nomesRemovidos} nome(s) de empresa removidos de outro CNPJ, ${unidas} empresa(s) sem CNPJ unida(s).`
+        );
+    }
 
     // A base indexa VÁRIAS notas ao mesmo tempo, então perguntas no singular
     // ("qual o valor desta nota?") não têm referente: a busca vetorial traz
@@ -88,8 +141,9 @@ try {
     //   1. agregadas — sobre o conjunto ("quais prestadores aparecem?")
     //   2. direcionadas — a pergunta identifica a nota ("na nota do prestador X")
     //
-    // As agregadas são limitadas por topK: só os chunks recuperados são vistos,
-    // então a resposta cobre parte do acervo, não o total.
+    // Com o grafo (EXTRACTION_ENABLED), as agregadas são respondidas por Cypher
+    // sobre todas as notas. Sem ele, ficam limitadas por topK: só os chunks
+    // recuperados são vistos, e a resposta cobre parte do acervo.
     const questions = [
         "Quais prestadores de serviço aparecem nas notas e quais são os CNPJs de cada um?",
         "Em quais municípios e UFs os serviços foram prestados?",
@@ -107,7 +161,10 @@ try {
         vectorStore: _neo4jVectorStore,
         promptConfig: CONFIG.promptConfig,
         templateText: CONFIG.templateText,
-        topK: CONFIG.similarity.topK
+        topK: CONFIG.similarity.topK,
+        graph: extractor
+            ? { router: structuredModel, maxRows: CONFIG.extraction.maxRows }
+            : undefined,
     });
 
     for (const index in questions) {
