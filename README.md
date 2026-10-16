@@ -398,8 +398,22 @@ npm run chat:down  #    para o Open WebUI
   Oracle não sobe sozinha, mas o chat não precisa dela — só a indexação.
   Com o serviço instalado, não rode `npm run serve` ao mesmo tempo: a porta
   8000 estará ocupada.
-- **Limitação:** cada mensagem é uma pergunta independente. Perguntas de
-  continuação ("e a outra nota?") ainda não usam o histórico da conversa.
+- **Histórico da conversa:** perguntas de continuação funcionam. Antes da
+  cadeia, a pergunta é reescrita com as últimas `API_HISTORY_TURNS` trocas
+  (padrão 3; `0` desliga):
+
+  | Conversa | Pergunta que a cadeia recebe |
+  |---|---|
+  | "Quais prestadores aparecem?" → "Dados da nota do **segundo** da lista?" | "Quais os dados da nota do *NOME DO 2º DA LISTA*?" |
+  | "Dados da nota 152?" → "E o ISS retido **dela**?" | "Qual o ISS retido na nota 152?" |
+  | qualquer conversa → "Em quais municípios os serviços foram prestados?" | igual (pergunta completa não é reescrita) |
+
+  Só passa pelo reescritor (LLM, temperatura 0) a pergunta com referência à
+  conversa — pronome ("dela", "dessa"), ordinal ("o segundo"), "a outra",
+  começar com "E…" — ou bem curta. Ordinais são resolvidos por regra, na
+  lista em negrito mais recente da conversa: contar itens é onde o LLM de 2B
+  mais erra. A pergunta reescrita aparece no log (`💬`). Cada continuação
+  custa ~2 s a mais.
 
 ### Limpeza
 
