@@ -156,6 +156,13 @@ export async function saveNota(store: Neo4jVectorStore, record: PdfRecord, nota:
 }
 
 /**
+ * Filtro de emissão de todas as rotas. $inicio/$fim vêm de src/periodo.ts
+ * (aaaa-mm-dd, comparável como texto); null = sem limite. Com período, notas
+ * sem data de emissão ficam de fora.
+ */
+const NO_PERIODO = `($inicio IS NULL OR n.dataEmissaoIso >= $inicio) AND ($fim IS NULL OR n.dataEmissaoIso <= $fim)`;
+
+/**
  * Consultas que respondem as perguntas sobre o conjunto. O LLM só escolhe a
  * rota (ver src/ai.ts) — não escreve Cypher: um modelo de 2B gerando consultas
  * livres erraria nomes de propriedades e relações.
@@ -163,27 +170,27 @@ export async function saveNota(store: Neo4jVectorStore, record: PdfRecord, nota:
 export const GRAPH_ROUTES = {
     prestadores: {
         descricao: "quais prestadores/emissores aparecem, com CNPJ e quantidade de notas",
-        cypher: `MATCH (p:Empresa)-[:PRESTOU]->(n:Nota)
+        cypher: `MATCH (p:Empresa)-[:PRESTOU]->(n:Nota) WHERE ${NO_PERIODO}
                  RETURN p.nome AS prestador, coalesce(p.documento, '-') AS cnpj_cpf, count(n) AS notas,
                         round(sum(coalesce(n.valorTotal, 0)), 2) AS valor_total
                  ORDER BY notas DESC, prestador`,
     },
     municipios: {
         descricao: "em quais municípios/UFs os serviços foram prestados",
-        cypher: `MATCH (n:Nota) WHERE n.municipio IS NOT NULL OR n.uf IS NOT NULL
+        cypher: `MATCH (n:Nota) WHERE (n.municipio IS NOT NULL OR n.uf IS NOT NULL) AND ${NO_PERIODO}
                  RETURN coalesce(n.municipio, '-') AS municipio, coalesce(n.uf, '-') AS uf, count(n) AS notas
                  ORDER BY notas DESC, municipio`,
     },
     tipos_servico: {
         descricao: "tipos de serviço (comissão, premiação, promoção de venda) e quantas notas de cada",
-        cypher: `MATCH (n:Nota)
+        cypher: `MATCH (n:Nota) WHERE ${NO_PERIODO}
                  RETURN coalesce(n.tipoServico, 'NÃO IDENTIFICADO') AS tipo_servico, count(n) AS notas,
                         round(sum(coalesce(n.valorTotal, 0)), 2) AS valor_total
                  ORDER BY notas DESC`,
     },
     retencoes: {
         descricao: "notas com retenção de ISS/ISSQN ou IR/IRRF e os valores retidos",
-        cypher: `MATCH (n:Nota) WHERE n.issRetido > 0 OR n.irrfRetido > 0
+        cypher: `MATCH (n:Nota) WHERE (n.issRetido > 0 OR n.irrfRetido > 0) AND ${NO_PERIODO}
                  OPTIONAL MATCH (p:Empresa)-[:PRESTOU]->(n)
                  RETURN coalesce(n.numero, '-') AS nota, coalesce(p.nome, '-') AS prestador,
                         coalesce(n.dataEmissao, '-') AS emissao, n.valorTotal AS valor_total,
@@ -199,14 +206,24 @@ export const GRAPH_ROUTES = {
                  OPTIONAL MATCH (p:Empresa)-[:PRESTOU]->(n)
                  OPTIONAL MATCH (n)-[:TOMADA_POR]->(t:Empresa)
                  WITH n, p, t
-                 WHERE (p.nome IS NOT NULL
-                        AND toUpper($pergunta) CONTAINS toUpper(apoc.text.join(split(trim(p.nome), ' ')[0..2], ' ')))
-                    OR ($numero IS NOT NULL AND n.numero = $numero)
+                 WHERE ((p.nome IS NOT NULL
+                         AND toUpper($pergunta) CONTAINS toUpper(apoc.text.join(split(trim(p.nome), ' ')[0..2], ' ')))
+                     OR ($numero IS NOT NULL AND n.numero = $numero))
+                   AND ${NO_PERIODO}
                  RETURN coalesce(n.numero, '-') AS nota, coalesce(p.nome, '-') AS prestador,
                         coalesce(p.documento, '-') AS cnpj_prestador, coalesce(t.nome, '-') AS tomador,
                         coalesce(n.dataEmissao, '-') AS emissao, n.valorTotal AS valor_total,
                         coalesce(n.municipio, '-') AS municipio, coalesce(n.tipoServico, '-') AS tipo_servico
                  ORDER BY n.dataEmissaoIso`,
+    },
+    notas_por_periodo: {
+        descricao: "notas emitidas em uma data ou período (ex.: de 01/10 até hoje, em outubro, neste mês, as mais recentes)",
+        cypher: `MATCH (n:Nota) WHERE n.dataEmissaoIso IS NOT NULL AND ${NO_PERIODO}
+                 OPTIONAL MATCH (p:Empresa)-[:PRESTOU]->(n)
+                 RETURN coalesce(n.numero, '-') AS nota, coalesce(p.nome, '-') AS prestador,
+                        n.dataEmissao AS emissao, n.valorTotal AS valor_total,
+                        coalesce(n.tipoServico, '-') AS tipo_servico
+                 ORDER BY n.dataEmissaoIso DESC`,
     },
 } as const;
 

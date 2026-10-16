@@ -5,6 +5,7 @@ import { RunnableSequence } from "@langchain/core/runnables";
 import { ChatOpenAI } from "@langchain/openai"
 import { z } from "zod";
 import { formatRows, GRAPH_ROUTES, type GraphRoute } from "./graph.ts";
+import { periodoNaPergunta, semDatas, type Periodo } from "./periodo.ts";
 
 type DebugLog = (...args: unknown[]) => void;
 type params = {
@@ -65,6 +66,9 @@ function textoParaBuscaPorPalavra(pergunta: string): string {
         .replace(/\b(AND|OR|NOT)\b/g, termo => termo.toLowerCase());
 }
 
+/** Teto de "notas mais recentes" quando a pergunta não cita período. */
+const NOTAS_MAIS_RECENTES = 20;
+
 /** Número de nota citado na pergunta ("nota 206", "NFS-e nº 202200000000152"). */
 function numeroNaPergunta(pergunta: string): string | null {
     return pergunta.match(/\b\d{3,}\b/)?.[0] ?? null;
@@ -103,7 +107,9 @@ function dependeDaConversa(pergunta: string): boolean {
 const ORDINAIS: [RegExp, number][] = [
     [/(?<!\p{L})primeir[ao]s?(?!\p{L})/iu, 1], [/(?<!\p{L})segund[ao]s?(?!\p{L})/iu, 2],
     [/(?<!\p{L})terceir[ao]s?(?!\p{L})/iu, 3], [/(?<!\p{L})quart[ao]s?(?!\p{L})/iu, 4],
-    [/(?<!\p{L})quint[ao]s?(?!\p{L})/iu, 5], [/(?<!\p{L})últim[ao]s?(?!\p{L})/iu, -1],
+    [/(?<!\p{L})quint[ao]s?(?!\p{L})/iu, 5],
+    // "o último" da lista, mas não "o último mês" (período, ver src/periodo.ts).
+    [/(?<!\p{L})últim[ao]s?(?!\p{L})(?!\s+(?:m[eê]s|ano|semana|dias?)(?!\p{L}))/iu, -1],
 ];
 
 /**
@@ -169,6 +175,8 @@ interface ChainState {
     /** Tabela do grafo, anexada à resposta sem passar pelo LLM. */
     graphTable?: string;
     route?: GraphRoute | "texto_livre";
+    /** Período de emissão citado na pergunta; filtra todas as rotas do grafo. */
+    periodo?: Periodo | null;
     context?: string;
     topScore?: number;
     error?: string;
@@ -233,34 +241,69 @@ export class AI {
                 `Classifique a pergunta sobre notas fiscais de serviço na rota que a responde.\n` +
                 `Rotas:\n${rotas}\n- texto_livre: qualquer outra pergunta\n\nPergunta: ${input.question}`
             );
-        this.params.debugLog(`🧭 Rota: ${rota}`);
-        return { ...input, route: rota as ChainState["route"] };
+        const periodo = periodoNaPergunta(input.question);
+        // Pergunta com data que o roteador não soube encaixar é pergunta por
+        // período: a busca nos trechos não filtra datas.
+        const route = periodo && rota === "texto_livre" ? "notas_por_periodo" : rota as ChainState["route"];
+        this.params.debugLog(`🧭 Rota: ${route}${route !== rota ? ` (roteador: ${rota})` : ""}`);
+        if (periodo) this.params.debugLog(`📅 Período: ${periodo.descricao}`);
+        return { ...input, route, periodo };
     }
 
     async retrieveContext(input: ChainState): Promise<ChainState> {
         if (!input.route || input.route === "texto_livre") return this.retrieveVectorSearchResults(input);
 
-        const { cypher } = GRAPH_ROUTES[input.route];
-        const rows = await this.params.vectorStore.query(cypher, {
+        const { periodo } = input;
+        const consultar = (rota: GraphRoute) => this.params.vectorStore.query(GRAPH_ROUTES[rota].cypher, {
             pergunta: input.question,
-            numero: numeroNaPergunta(input.question),
+            // Sem as datas: o ano de "01/10/2026" não é número de nota.
+            numero: numeroNaPergunta(semDatas(input.question)),
+            inicio: periodo?.inicio ?? null,
+            fim: periodo?.fim ?? null,
         });
+        let route = input.route;
+        let rows = await consultar(route);
+        // "Havia nota emitida de 01/10 até hoje?" ia para nota_especifica, que
+        // sem nome nem número não acha nada.
+        if (!rows.length && periodo && route === "nota_especifica") {
+            this.params.debugLog(`⚠️  Consulta "${route}" sem resultado no período — tentando "notas_por_periodo".`);
+            route = "notas_por_periodo";
+            rows = await consultar(route);
+        }
+        if (!rows.length && periodo) {
+            // Os trechos não filtram datas: buscar neles traria notas de
+            // qualquer época. A resposta é a ausência, sem passar pelo LLM.
+            this.params.debugLog(`⚠️  Consulta "${route}" sem resultado no período.`);
+            return {
+                ...input,
+                route,
+                answer: `Não encontrei, entre as notas indexadas, nenhuma emitida ${periodo.descricao} que atenda à pergunta.`,
+            };
+        }
+        // Sem período, "as notas mais recentes": não despeja a base inteira.
+        let recorte = "";
+        if (route === "notas_por_periodo" && !periodo && rows.length > NOTAS_MAIS_RECENTES) {
+            rows = rows.slice(0, NOTAS_MAIS_RECENTES);
+            recorte = ` — as ${NOTAS_MAIS_RECENTES} emitidas mais recentemente`;
+        }
         if (!rows.length) {
             // Ex.: prestador que não está no grafo, ou campo que o extrator
             // descartou — os trechos ainda podem ter a resposta.
-            this.params.debugLog(`⚠️  Consulta "${input.route}" sem resultado no grafo — usando a busca nos trechos.`);
+            this.params.debugLog(`⚠️  Consulta "${route}" sem resultado no grafo — usando a busca nos trechos.`);
             return this.retrieveVectorSearchResults(input);
         }
-        this.params.debugLog(`🕸️  ${rows.length} linha(s) do grafo (${input.route}).`);
+        this.params.debugLog(`🕸️  ${rows.length} linha(s) do grafo (${route}).`);
         // O teto de linhas vale só para o contexto do LLM (8K no local); a
         // tabela anexada à resposta vai inteira.
         const graphTable = formatRows(rows, Number.POSITIVE_INFINITY);
         const context =
             `Resultado de uma consulta ao banco com TODAS as notas fiscais indexadas ` +
-            `(${rows.length} linha(s)). Valores em R$. A tabela completa será mostrada ao usuário ` +
+            `(${rows.length} linha(s)${recorte})` +
+            (periodo ? `, filtrado pelas notas emitidas ${periodo.descricao}` : "") +
+            `. Valores em R$. A tabela completa será mostrada ao usuário ` +
             `logo após a sua resposta: escreva um resumo curto, sem repetir a tabela linha a linha.\n\n` +
             formatRows(rows, this.params.graph!.maxRows);
-        return { ...input, context, graphTable };
+        return { ...input, route, context, graphTable };
     }
 
     async retrieveVectorSearchResults(input: ChainState): Promise<ChainState> {
