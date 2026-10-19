@@ -20,7 +20,7 @@ export async function setupGraph(store: Neo4jVectorStore): Promise<void> {
 }
 
 export async function clearGraph(store: Neo4jVectorStore): Promise<void> {
-    await store.query("MATCH (n) WHERE n:Nota OR n:Empresa DETACH DELETE n");
+    await store.query("MATCH (n) WHERE n:Nota OR n:Empresa OR n:Documento DETACH DELETE n");
 }
 
 /**

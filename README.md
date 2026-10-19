@@ -298,6 +298,46 @@ perguntas padrão de `src/index.ts`. Cada resposta vai para
 `respostas/resposta-<nº>-<timestamp>.md`, com o nº na ordem do arquivo. Não rode as duas formas ao mesmo
 tempo: a reindexação apaga o grafo que a outra está consultando.
 
+### Indexação incremental e agendada
+
+A tabela de PDFs recebe arquivos novos o tempo todo. Em vez de reindexar tudo,
+`npm run index` processa só os documentos que ainda não estão no Neo4j, sem
+apagar nada:
+
+- **Pendentes = IDs do Oracle − IDs já processados.** Por ser diferença de
+  conjuntos (e não "maior ID visto"), pega também o acervo antigo e linhas
+  gravadas fora de ordem.
+- **Do mais novo para o mais antigo:** os documentos do dia entram primeiro e o
+  acervo antigo vai sendo consumido nas rodadas seguintes.
+- **Limites por rodada:** `INGEST_MAX_MINUTES` (padrão 300) e `INGEST_MAX_DOCS`.
+  O documento em andamento termina; o resto fica para a próxima rodada.
+  `INGEST_SINCE=aaaa-mm-dd` limita o acervo pela data de inclusão
+  (`ORACLE_PDF_DATE_COLUMN`).
+- **Todo documento processado é registrado** em `(:Documento {oracleId, status})`,
+  inclusive os que não viraram nota (`sem_texto`, `nao_nfse`, `falha_extracao`),
+  para não serem tentados de novo a cada rodada.
+- Ao fim de cada rodada as correções pelo conjunto rodam de novo sobre o grafo
+  inteiro (elas só mexem no que está errado).
+
+Para agendar no crontab do usuário (sem sudo):
+
+```bash
+npm run index:schedule                    # todo dia às 02:00
+npm run index:schedule -- "30 1 * * 1-5"  # outro horário (formato do cron)
+npm run index:schedule -- --status
+npm run index:schedule -- --remover
+```
+
+O agendamento chama `scripts/indexar.sh`, que carrega o Node 22 do nvm e o
+Instant Client (o cron não lê o perfil do shell), impede duas rodadas ao mesmo
+tempo e grava `logs/indexacao-AAAA-MM-DD.log` (fora do git; mantidos 30 dias).
+Para rodar agora com o mesmo log: `bash scripts/indexar.sh`.
+
+O LLM e os limites vêm do `.env`. Para manter os dados locais, deixe nele
+`NLP_MODEL=gemma4-e2b-8k` e `LLM_REASONING_EFFORT=none`. Na hora agendada a
+máquina precisa estar ligada (sem suspender), com a VPN do Oracle, o Neo4j e o
+Ollama no ar.
+
 ### Limpeza
 
 ```bash
@@ -448,12 +488,16 @@ Com `" "` os embeddings ficam melhores — nos testes os scores subiram de
 | `src/oracle.ts` | Thick mode + pool + leitura dos BLOBs como `AsyncGenerator<PdfRecord>` |
 | `src/documentProcessor.ts` | BLOB → páginas de PDF → chunks, com metadata rastreável |
 | `src/ocr.ts` | OCR de PDFs sem texto: `pdftoppm` → PNG → `glm-ocr` no Ollama |
-| `src/index.ts` | orquestra ingestão em lote e o loop de perguntas |
+| `src/index.ts` | reindexação completa (ou `SKIP_INGEST`) e o loop de perguntas |
+| `src/indexer.ts` | indexação incremental: só os PDFs ainda não processados |
+| `src/ingest.ts` | processamento de um PDF (chunks, nota, registro em `Documento`) |
+| `src/models.ts` | criação dos embeddings e do LLM |
 | `src/oracleCheck.ts` | smoke test isolado do Oracle |
 | `src/ai.ts` | roteamento da pergunta, retrieval (grafo ou trechos) + geração da resposta |
 | `src/nfseSchema.ts` | campos extraídos de cada NFS-e |
 | `src/nfseExtractor.ts` | extração com o LLM + validação de CNPJ, valores, datas e retenções contra o texto |
 | `src/graph.ts` | grafo `Empresa`/`Nota`, gravação e as consultas Cypher de cada rota |
+| `scripts/indexar.sh` / `scripts/agendar.sh` | rodada agendada (ambiente do cron, trava, logs) e instalação no crontab |
 | `scripts/clean.sh` | remove os artefatos gerados, inclusive os root-owned do container |
 | `ollama/` | Modelfile do LLM local com contexto de 8192 tokens |
 | `prompts/` | `answerPrompt.json` (role/task/instruções) e `template.txt` |

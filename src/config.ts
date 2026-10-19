@@ -24,6 +24,8 @@ export interface OracleConfig {
     idColumn: string;
     nameColumn: string;
     blobColumn: string;
+    /** Data de inclusão da linha (ex.: INCLUIDO_EM). Opcional; usada por INGEST_SINCE. */
+    dateColumn?: string;
     /** Sobrescreve a query montada. Deve retornar ID, NAME, DATA e usar o bind :maxDocs. */
     query?: string;
     maxDocs: number;
@@ -56,6 +58,15 @@ function positiveInt(value: string | undefined, envName: string, fallback: numbe
         throw new Error(`${envName}="${value}" deve ser um inteiro positivo.`);
     }
     return parsed;
+}
+
+function isoDate(value: string | undefined, envName: string): string | undefined {
+    if (!value?.trim()) return undefined;
+    const resolved = value.trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(resolved) || Number.isNaN(Date.parse(resolved))) {
+        throw new Error(`${envName}="${value}" deve ser uma data no formato aaaa-mm-dd.`);
+    }
+    return resolved;
 }
 
 export const CONFIG = Object.freeze({
@@ -117,6 +128,9 @@ export const CONFIG = Object.freeze({
         idColumn: identifier(process.env.ORACLE_PDF_ID_COLUMN, 'ORACLE_PDF_ID_COLUMN', 'ID'),
         nameColumn: identifier(process.env.ORACLE_PDF_NAME_COLUMN, 'ORACLE_PDF_NAME_COLUMN', 'NOME'),
         blobColumn: identifier(process.env.ORACLE_PDF_BLOB_COLUMN, 'ORACLE_PDF_BLOB_COLUMN', 'ARQUIVO'),
+        dateColumn: process.env.ORACLE_PDF_DATE_COLUMN?.trim()
+            ? identifier(process.env.ORACLE_PDF_DATE_COLUMN, 'ORACLE_PDF_DATE_COLUMN', '')
+            : undefined,
         query: process.env.ORACLE_PDF_QUERY?.trim() || undefined,
         maxDocs: positiveInt(process.env.ORACLE_PDF_MAX_DOCS, 'ORACLE_PDF_MAX_DOCS', 10),
         poolMin: positiveInt(process.env.ORACLE_POOL_MIN, 'ORACLE_POOL_MIN', 1),
@@ -175,6 +189,18 @@ export const CONFIG = Object.freeze({
         // que já está no Neo4j: segundos em vez dos ~45 min de reindexar 100
         // PDFs. Útil para testar prompts, rotas e perguntas.
         skip: process.env.SKIP_INGEST?.trim().toLowerCase() === "true",
+        // Indexação incremental (npm run index): para de pegar documentos novos
+        // depois deste tempo, para a rodada da madrugada não invadir o
+        // expediente. O documento em andamento termina.
+        maxMinutes: positiveInt(process.env.INGEST_MAX_MINUTES, 'INGEST_MAX_MINUTES', 300),
+        // Teto de documentos por rodada; vazio = sem teto (só o de tempo).
+        maxDocs: process.env.INGEST_MAX_DOCS?.trim()
+            ? positiveInt(process.env.INGEST_MAX_DOCS, 'INGEST_MAX_DOCS', 1)
+            : Number.POSITIVE_INFINITY,
+        // Só documentos incluídos a partir desta data (aaaa-mm-dd), pela coluna
+        // ORACLE_PDF_DATE_COLUMN. Vazio = o acervo inteiro, dos mais novos aos
+        // mais antigos.
+        since: isoDate(process.env.INGEST_SINCE, 'INGEST_SINCE'),
     },
     similarity: {
         // 8 e não 3: a base tem ~28 chunks de 9 notas, e as perguntas agregadas

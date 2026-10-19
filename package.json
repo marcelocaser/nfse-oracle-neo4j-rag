@@ -5,6 +5,8 @@
   "scripts": {
     "start": "node --env-file .env --experimental-strip-types src/index.ts",
     "dev": "node --no-warnings --env-file .env --watch --experimental-strip-types src/index.ts",
+    "index": "node --env-file .env --experimental-strip-types src/indexer.ts",
+    "index:schedule": "bash scripts/agendar.sh",
     "typecheck": "tsc --noEmit",
     "oracle:check": "node --env-file .env --experimental-strip-types src/oracleCheck.ts",
     "infra:up": "docker compose up -d --wait",
