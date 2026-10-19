@@ -60,6 +60,13 @@ function positiveInt(value: string | undefined, envName: string, fallback: numbe
     return parsed;
 }
 
+function idList(value: string | undefined, envName: string): string[] {
+    const ids = (value ?? "").split(",").map(id => id.trim()).filter(Boolean);
+    const invalid = ids.find(id => !/^\d+$/.test(id));
+    if (invalid) throw new Error(`${envName}: "${invalid}" não é um ID numérico.`);
+    return ids;
+}
+
 function isoDate(value: string | undefined, envName: string): string | undefined {
     if (!value?.trim()) return undefined;
     const resolved = value.trim();
@@ -201,6 +208,9 @@ export const CONFIG = Object.freeze({
         // ORACLE_PDF_DATE_COLUMN. Vazio = o acervo inteiro, dos mais novos aos
         // mais antigos.
         since: isoDate(process.env.INGEST_SINCE, 'INGEST_SINCE'),
+        // IDs a reprocessar mesmo já indexados (ex.: "15027,15032"), depois de
+        // uma correção no extrator. Com a lista, a rodada processa só eles.
+        reprocess: idList(process.env.INGEST_REPROCESS, 'INGEST_REPROCESS'),
     },
     similarity: {
         // 8 e não 3: a base tem ~28 chunks de 9 notas, e as perguntas agregadas
