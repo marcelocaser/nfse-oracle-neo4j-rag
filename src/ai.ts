@@ -15,6 +15,12 @@ type params = {
     templateText: string,
     topK: number,
     /**
+     * LLM com temperatura 0 que reescreve uma pergunta de continuação ("e o
+     * valor dela?") como pergunta completa, usando o histórico. Sem ele, o
+     * histórico é ignorado.
+     */
+    rewriter?: ChatOpenAI,
+    /**
      * Quando informado, a resposta é obtida via withStructuredOutput: o schema
      * vai como definição de função na chamada à API e o formato é imposto no
      * protocolo, não pedido no texto. Sem schema, cai no caminho de texto livre.
@@ -47,10 +53,116 @@ const routeSchema = z.object({
         .describe("A consulta que responde a pergunta; texto_livre se nenhuma das outras servir"),
 });
 
+/**
+ * Texto para o índice FULLTEXT (Lucene) da busca híbrida. O LangChain tira
+ * os caracteres especiais mas não a "/", que no Lucene abre uma expressão
+ * regular: "notas de 01/10 até hoje" estourava com TokenMgrError. AND/OR/NOT
+ * em maiúsculas também são operadores; em minúsculas viram termos comuns.
+ */
+function textoParaBuscaPorPalavra(pergunta: string): string {
+    return pergunta
+        .replace(/\//g, " ")
+        .replace(/\b(AND|OR|NOT)\b/g, termo => termo.toLowerCase());
+}
+
 /** Número de nota citado na pergunta ("nota 206", "NFS-e nº 202200000000152"). */
 function numeroNaPergunta(pergunta: string): string | null {
     return pergunta.match(/\b\d{3,}\b/)?.[0] ?? null;
 }
+
+/** Uma troca anterior da conversa. */
+export interface Turno {
+    pergunta: string;
+    resposta: string;
+}
+
+/** Teto de caracteres de cada resposta anterior levada ao reescritor. */
+const MAX_CHARS_RESPOSTA_HISTORICO = 1000;
+
+/** Marca a tabela do grafo que generatedNLPResponse anexa à resposta. */
+const MARCA_TABELA_GRAFO = "\n\n**Dados completos (consulta ao grafo):**";
+
+/**
+ * Sinais de que a pergunta depende da conversa: pronome ou demonstrativo
+ * ("dela", "dessa nota"), ordinal ("o segundo"), "a outra", ou começar com
+ * "E ...". Sem eles a pergunta nem vai ao reescritor: o LLM de 2B tendia a
+ * prender perguntas gerais ("em quais municípios...?") à nota anterior.
+ */
+const REFERENCIA_A_CONVERSA =
+    /^\s*e(?!\p{L})|(?<!\p{L})(?:(?:d|n)?(?:el|ess|est|aquel)[ae]s?|(?:outr|primeir|segund|terceir|últim|mesm)[ao]s?|anterior(?:es)?)(?!\p{L})/iu;
+
+/** Pergunta curta ("Qual o valor?") quase sempre depende do contexto. */
+const MAX_PALAVRAS_PERGUNTA_CURTA = 5;
+
+function dependeDaConversa(pergunta: string): boolean {
+    return REFERENCIA_A_CONVERSA.test(pergunta)
+        || pergunta.split(/\s+/).filter(Boolean).length <= MAX_PALAVRAS_PERGUNTA_CURTA;
+}
+
+/** Posição na lista por ordinal; -1 = o último. */
+const ORDINAIS: [RegExp, number][] = [
+    [/(?<!\p{L})primeir[ao]s?(?!\p{L})/iu, 1], [/(?<!\p{L})segund[ao]s?(?!\p{L})/iu, 2],
+    [/(?<!\p{L})terceir[ao]s?(?!\p{L})/iu, 3], [/(?<!\p{L})quart[ao]s?(?!\p{L})/iu, 4],
+    [/(?<!\p{L})quint[ao]s?(?!\p{L})/iu, 5], [/(?<!\p{L})últim[ao]s?(?!\p{L})/iu, -1],
+];
+
+/**
+ * "o segundo da lista" → o 2º item em negrito da lista mais recente da
+ * conversa ("*   **NOME** ..." ou "1. **NOME** ..."). Contar itens é onde o
+ * LLM de 2B mais erra: com 10 prestadores na lista, devolvia a pergunta igual.
+ */
+function itemPorOrdinal(pergunta: string, historico: Turno[]): string | null {
+    const itens = historico
+        // "**Valor:** R$ ..." e "**Valor**: R$ ..." são rótulos de campo, não
+        // itens de lista: os dois-pontos dentro ou logo depois do negrito.
+        .map(({ resposta }) => [...resposta.matchAll(/^\s*(?:[*-]|\d+[.)])\s+\*\*([^*:]+?)\*\*(?!\s*:)/gm)]
+            .map(m => m[1]!.trim()))
+        .reverse().find(lista => lista.length >= 2) ?? [];
+    if (!itens.length) return null;
+    const numero = pergunta.match(/(?<!\d)(\d{1,2})\s*[ºª°]/)?.[1];
+    const posicao = numero ? Number(numero) : ORDINAIS.find(([re]) => re.test(pergunta))?.[1];
+    if (!posicao) return null;
+    return (posicao === -1 ? itens.at(-1) : itens[posicao - 1]) ?? null;
+}
+
+/**
+ * Exemplos com dados fictícios: o LLM de 2B segue melhor um modelo do que
+ * uma regra. O último mostra que pergunta já completa volta igual.
+ */
+const PROMPT_REESCRITA = `Você reescreve a última pergunta de uma conversa sobre notas fiscais de serviço (NFS-e) para que ela possa ser entendida sozinha, sem a conversa.
+
+Regras:
+- Troque pronomes e referências ("dela", "essa nota", "a outra", "e o valor?") pelo nome da empresa, número da nota ou assunto citado na conversa.
+- Mantenha o sentido da pergunta. Não responda a pergunta.
+- Só reescreva se a pergunta tiver uma referência à conversa: pronome ("dela", "dessa", "desse"), "a outra", "o segundo", ou começar com "E ...". Sem referência, devolva-a sem mudanças, mesmo que o assunto seja parecido.
+- Devolva só a pergunta reescrita, em uma linha, sem explicações.
+
+Exemplo 1
+Conversa:
+Usuário: Quais os dados da nota da EMPRESA EXEMPLO LTDA?
+Assistente: A nota nº 120 da EMPRESA EXEMPLO LTDA foi emitida em 05/03/2025, no valor de R$ 1.500,00.
+Última pergunta: E qual o ISS retido dela?
+Pergunta reescrita: Qual o ISS retido na nota nº 120 da EMPRESA EXEMPLO LTDA?
+
+Exemplo 2
+Conversa:
+Usuário: Quais prestadores aparecem nas notas?
+Assistente: Aparecem a ALFA SERVIÇOS LTDA (3 notas) e a BETA COMÉRCIO ME (1 nota).
+Última pergunta: Quais os dados da nota da segunda?
+Pergunta reescrita: Quais os dados da nota da BETA COMÉRCIO ME?
+
+Exemplo 3
+Conversa:
+Usuário: Quais os dados da nota nº 15?
+Assistente: A nota nº 15 da GAMA REPRESENTAÇÕES LTDA vale R$ 800,00 e tem ISS retido.
+Última pergunta: Quais tipos de serviço aparecem nas notas?
+Pergunta reescrita: Quais tipos de serviço aparecem nas notas?
+
+Agora a sua vez.
+Conversa:
+{conversa}
+Última pergunta: {pergunta}
+Pergunta reescrita:`;
 
 interface ChainState {
     question: string;
@@ -70,6 +182,46 @@ export class AI {
 
     constructor(params: params) {
         this.params = params;
+    }
+
+    /**
+     * Transforma uma pergunta de continuação em pergunta completa. O resto da
+     * cadeia (roteador, Cypher por nome/número, busca nos trechos) só enxerga
+     * a pergunta, então é ela que precisa carregar o nome ou o número.
+     */
+    async reformularPergunta(pergunta: string, historico: Turno[]): Promise<string> {
+        if (!this.params.rewriter || !historico.length || !dependeDaConversa(pergunta)) return pergunta;
+        const item = itemPorOrdinal(pergunta, historico);
+        if (item) {
+            this.params.debugLog(`🔢 Item da lista anterior: ${item}`);
+            pergunta = `${pergunta.replace(/[?\s]+$/, "")} (${item})?`;
+        }
+        const conversa = historico.map(({ pergunta: p, resposta }) => {
+            // A tabela do grafo pode ter dezenas de linhas e confunde o LLM de
+            // 2B; o resumo antes dela já cita os nomes e números.
+            const r = resposta.split(MARCA_TABELA_GRAFO)[0]!.trim();
+            const resumo = r.length > MAX_CHARS_RESPOSTA_HISTORICO
+                ? `${r.slice(0, MAX_CHARS_RESPOSTA_HISTORICO)}…`
+                : r;
+            return `Usuário: ${p}\nAssistente: ${resumo}`;
+        }).join("\n");
+        const bruta = await ChatPromptTemplate.fromTemplate(PROMPT_REESCRITA)
+            .pipe(this.params.rewriter)
+            .pipe(new StringOutputParser())
+            .invoke({ conversa, pergunta });
+        // O modelo às vezes repete o rótulo, põe aspas ou acrescenta linhas.
+        const reescrita = (bruta.trim().split("\n")[0] ?? "")
+            .replace(/^(pergunta reescrita|pergunta)\s*:\s*/i, "")
+            .replace(/^["'“”]+|["'“”]+$/g, "")
+            .trim();
+        // Saída vazia ou desproporcional (respondeu em vez de reescrever):
+        // melhor a pergunta original do que uma pergunta errada.
+        if (!reescrita || reescrita.length > Math.max(300, pergunta.length * 4)) {
+            this.params.debugLog("⚠️  Reescrita descartada; usando a pergunta como veio.");
+            return pergunta;
+        }
+        if (reescrita !== pergunta) this.params.debugLog(`💬 Pergunta reescrita: ${reescrita}`);
+        return reescrita;
     }
 
     async routeQuestion(input: ChainState): Promise<ChainState> {
@@ -113,7 +265,12 @@ export class AI {
 
     async retrieveVectorSearchResults(input: ChainState): Promise<ChainState> {
         this.params.debugLog("🔍 Buscando no vector store do Neo4j...");
-        const vectorResults = await this.params.vectorStore.similaritySearchWithScore(input.question, this.params.topK);
+        // O embedding sai da pergunta como veio; só a busca por palavra-chave
+        // recebe o texto ajustado.
+        const embedding = await this.params.vectorStore.embeddings.embedQuery(input.question);
+        const vectorResults = await this.params.vectorStore.similaritySearchVectorWithScore(
+            embedding, this.params.topK, textoParaBuscaPorPalavra(input.question),
+        );
         if (!vectorResults.length) {
             this.params.debugLog("⚠️  Nenhum resultado encontrado no vector store.");
             return {
@@ -195,7 +352,7 @@ export class AI {
         // Um LLM de 2B esquece linhas ao resumir uma tabela (citou 5 de 8 notas
         // com retenção): os dados do grafo vão inteiros, direto do banco.
         const answer = input.graphTable
-            ? `${(rawResponse as string).trim()}\n\n**Dados completos (consulta ao grafo):**\n\n${input.graphTable}`
+            ? `${(rawResponse as string).trim()}${MARCA_TABELA_GRAFO}\n\n${input.graphTable}`
             : rawResponse as string;
         return {
             ...input,
@@ -203,7 +360,12 @@ export class AI {
         }
     }
 
-    async anwerQuestion(question: string) {
+    /**
+     * @param historico trocas anteriores da conversa, da mais antiga para a
+     * mais recente. Com histórico, a pergunta é reescrita antes da cadeia.
+     */
+    async anwerQuestion(pergunta: string, historico: Turno[] = []) {
+        const question = await this.reformularPergunta(pergunta, historico);
         const chain = RunnableSequence.from([
             this.routeQuestion.bind(this),
             this.retrieveContext.bind(this),

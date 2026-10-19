@@ -225,6 +225,12 @@ export const CONFIG = Object.freeze({
         // A GPU atende uma pergunta por vez; acima disso a API responde 503
         // em vez de deixar a pessoa esperando minutos.
         maxQueue: positiveInt(process.env.API_MAX_QUEUE, 'API_MAX_QUEUE', 10),
+        // Trocas anteriores (pergunta + resposta) usadas para entender uma
+        // pergunta de continuação ("e o valor dela?"). 0 desliga o histórico:
+        // cada mensagem vira uma pergunta independente.
+        historyTurns: process.env.API_HISTORY_TURNS?.trim() === "0"
+            ? 0
+            : positiveInt(process.env.API_HISTORY_TURNS, 'API_HISTORY_TURNS', 3),
     },
     similarity: {
         // 8 e não 3: a base tem ~28 chunks de 9 notas, e as perguntas agregadas
