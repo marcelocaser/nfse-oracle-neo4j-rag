@@ -496,13 +496,24 @@ Por isso, na ingestão, cada documento também vira um nó no grafo:
    que o texto de um documento sozinho não resolve.
 3. **Roteamento** (`src/ai.ts`): o LLM só classifica a pergunta numa rota fixa
    (`prestadores`, `municipios`, `tipos_servico`, `retencoes`,
-   `nota_especifica`, `texto_livre`) — ele **não escreve Cypher nem extrai
+   `nota_especifica`, `notas_por_periodo`, `texto_livre`) — ele **não escreve Cypher nem extrai
    termos**. As rotas rodam consultas prontas (`src/graph.ts`) sobre todas as
    notas; em `nota_especifica` o próprio Cypher acha a empresa cujo nome (duas
    primeiras palavras) aparece na pergunta, ou o número da nota citado.
    `texto_livre`, ou uma consulta sem resultado, cai na busca nos trechos.
    O LLM escreve um resumo curto e a **tabela do grafo é anexada à resposta
    sem passar por ele**: o modelo de 2B citava 5 das 8 notas com retenção.
+4. **Período** (`src/periodo.ts`): datas da pergunta saem por regra e filtram
+   **todas** as rotas pela data de emissão (`dataEmissaoIso`) — "retenções
+   neste mês", "prestadores em outubro". Entende `01/10`, `01/10/2026`,
+   "de 01/10 até hoje", "desde 05/10", "até 10/10", "em outubro (de 2025)",
+   "neste mês", "mês passado", "últimos 7 dias", "hoje", "ontem", "este ano",
+   "ano passado", "em 2025". Sem ano, vale o corrente (ou o anterior, se a data
+   ainda não chegou). Pergunta com data que o roteador manda para
+   `texto_livre` — ou `nota_especifica` sem resultado — vira
+   `notas_por_periodo`; sem nenhuma nota no período, a resposta diz isso, sem
+   cair na busca nos trechos (que não filtra datas). O período vale para a data
+   de **emissão** da nota, não para a de inclusão no Oracle (`INGEST_SINCE`).
 
 Consultas úteis no Neo4j Browser:
 
@@ -575,6 +586,7 @@ Com `" "` os embeddings ficam melhores — nos testes os scores subiram de
 | `src/nfseSchema.ts` | campos extraídos de cada NFS-e |
 | `src/nfseExtractor.ts` | extração com o LLM + validação de CNPJ, valores, datas e retenções contra o texto |
 | `src/graph.ts` | grafo `Empresa`/`Nota`, gravação e as consultas Cypher de cada rota |
+| `src/periodo.ts` | período de emissão citado na pergunta ("de 01/10 até hoje", "em outubro") |
 | `scripts/serve.sh` / `scripts/servico-api.sh` | sobe a API com o Node do nvm e a instala como serviço do systemd |
 | `scripts/indexar.sh` / `scripts/agendar.sh` | rodada agendada (ambiente do cron, trava, logs) e instalação no crontab |
 | `scripts/clean.sh` | remove os artefatos gerados, inclusive os root-owned do container |
