@@ -10,9 +10,11 @@ services:
       - ./neo4j/logs:/logs
       - ./neo4j/plugins:/plugins
       - ./import:/var/lib/neo4j/import
+    # Só nesta máquina: na rede local, quem fica exposto é o Open WebUI,
+    # com login. O Neo4j usa a senha padrão e não deve ser alcançável.
     ports:
-      - "7474:7474"  # Neo4j Browser
-      - "7687:7687"  # Bolt Protocol (for queries)
+      - "127.0.0.1:7474:7474"  # Neo4j Browser
+      - "127.0.0.1:7687:7687"  # Bolt Protocol (for queries)
     environment:
       - NEO4J_AUTH=neo4j/password
       - NEO4JLABS_PLUGINS=["apoc"]
@@ -21,3 +23,37 @@ services:
       # mv /var/lib/neo4j/import/neo4j-export.csv /data/neo4j-export.csv
       - NEO4J_apoc_export_file_enabled=true
       - NEO4J_apoc_import_file_use__neo4j__config=true
+
+  # Chat para os usuários (npm run chat:up). Conversa só com a API de perguntas
+  # (npm run serve), nunca direto com o Ollama.
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:v0.11.4
+    container_name: open-webui
+    profiles: ["chat"]
+    restart: unless-stopped
+    # Rede do host: alcança a API em 127.0.0.1 sem expô-la na rede, e escuta
+    # direto em WEBUI_PORT.
+    network_mode: host
+    volumes:
+      - ./open-webui:/app/backend/data
+    environment:
+      - PORT=${WEBUI_PORT:-3000}
+      - WEBUI_NAME=NFS-e
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:?defina WEBUI_SECRET_KEY no .env}
+      - ENABLE_OLLAMA_API=false
+      - OPENAI_API_BASE_URL=http://127.0.0.1:${API_PORT:-8000}/v1
+      - OPENAI_API_KEY=${RAG_API_KEY:?defina RAG_API_KEY no .env}
+      # O compose é a fonte da configuração: ajustes feitos no painel de
+      # administração voltam ao valor daqui quando o container reinicia.
+      - ENABLE_PERSISTENT_CONFIG=false
+      # O primeiro cadastro vira administrador e o cadastro se fecha; contas
+      # criadas depois ficam pendentes até o administrador aprovar.
+      - DEFAULT_USER_ROLE=pending
+      # Tarefas de fundo chamariam o único modelo (a nossa API) e ocupariam a
+      # fila da GPU a cada mensagem.
+      - ENABLE_TITLE_GENERATION=false
+      - ENABLE_TAGS_GENERATION=false
+      - ENABLE_FOLLOW_UP_GENERATION=false
+      - ENABLE_AUTOCOMPLETE_GENERATION=false
+      - ENABLE_RETRIEVAL_QUERY_GENERATION=false
+      - ENABLE_SEARCH_QUERY_GENERATION=false

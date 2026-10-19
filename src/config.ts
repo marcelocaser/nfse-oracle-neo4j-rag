@@ -212,6 +212,20 @@ export const CONFIG = Object.freeze({
         // uma correção no extrator. Com a lista, a rodada processa só eles.
         reprocess: idList(process.env.INGEST_REPROCESS, 'INGEST_REPROCESS'),
     },
+    api: {
+        // Servidor de perguntas (npm run serve), no formato da API da OpenAI
+        // para o Open WebUI. Só escuta na própria máquina: quem fica exposto na
+        // rede é o Open WebUI, com login.
+        host: process.env.API_HOST?.trim() || "127.0.0.1",
+        port: positiveInt(process.env.API_PORT, 'API_PORT', 8000),
+        // Chave que o Open WebUI manda em "Authorization: Bearer ...".
+        key: process.env.RAG_API_KEY?.trim() || "",
+        // Nome do "modelo" que aparece no Open WebUI.
+        modelName: process.env.API_MODEL_NAME?.trim() || "nfse",
+        // A GPU atende uma pergunta por vez; acima disso a API responde 503
+        // em vez de deixar a pessoa esperando minutos.
+        maxQueue: positiveInt(process.env.API_MAX_QUEUE, 'API_MAX_QUEUE', 10),
+    },
     similarity: {
         // 8 e não 3: a base tem ~28 chunks de 9 notas, e as perguntas agregadas
         // ("quais prestadores aparecem?") precisam alcançar vários documentos.

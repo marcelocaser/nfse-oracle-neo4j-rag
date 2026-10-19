@@ -341,6 +341,66 @@ O LLM e os limites vêm do `.env`. Para manter os dados locais, deixe nele
 máquina precisa estar ligada (sem suspender), com a VPN do Oracle, o Neo4j e o
 Ollama no ar.
 
+### Chat na rede local (API + Open WebUI)
+
+Para outras pessoas fazerem perguntas pelo navegador, sem `npm start`:
+
+```
+navegador (rede local) ──► Open WebUI :3000 ──► API :8000 (127.0.0.1) ──► Neo4j + Ollama
+                           login e histórico     roteador, grafo, trechos
+```
+
+```bash
+npm run serve      # 1. API de perguntas (deixe rodando) — ou instale como serviço, abaixo
+npm run chat:up    # 2. Open WebUI em http://<ip-desta-máquina>:3000
+npm run chat:down  #    para o Open WebUI
+```
+
+- **API (`src/server.ts`)**: formato da API da OpenAI (`/v1/models`,
+  `/v1/chat/completions`, com e sem stream) e `/health`. Exige a chave
+  `RAG_API_KEY` e só escuta em `127.0.0.1`. Atende **uma pergunta por vez**
+  (a GPU não comporta duas); até `API_MAX_QUEUE` esperam na fila, acima disso
+  a resposta é 503.
+- **Open WebUI**: o **primeiro cadastro vira administrador** e o cadastro se
+  fecha; as contas seguintes ficam pendentes até o administrador aprovar
+  (Painel de administração → Usuários). O único modelo é o `nfse`: a
+  conexão direta com o Ollama está desligada, e as tarefas de fundo (título,
+  tags, sugestões, autocompletar) também, porque ocupariam a fila da GPU.
+- A configuração do Open WebUI vem do `docker-compose.yml`
+  (`ENABLE_PERSISTENT_CONFIG=false`): ajustes feitos no painel voltam ao valor
+  do compose quando o container reinicia. Usuários e conversas ficam em
+  `open-webui/` (fora do git).
+- O Neo4j, a API e o Ollama só aceitam conexões desta máquina; na rede, só a
+  porta do Open WebUI (`WEBUI_PORT`, padrão 3000).
+- **API como serviço** (sobe com a máquina e reinicia sozinha se cair):
+
+  ```bash
+  npm run api:service                  # instala/atualiza e (re)inicia (systemd do usuário)
+  npm run api:service -- --status      # estado e últimas linhas do log
+  npm run api:service -- --remover     # para e remove o serviço
+  journalctl --user -u nfse-api -f     # log ao vivo das perguntas
+  ```
+
+  A API lê o código e o `.env` só ao iniciar: depois de um `git pull` ou de
+  mudar o `.env`, rode `npm run api:service` de novo para reiniciá-la.
+
+  Sem *linger*, o serviço do usuário só sobe quando você faz login. Para subir
+  no boot mesmo sem ninguém logado, rode uma vez (pede sudo):
+
+  ```bash
+  sudo loginctl enable-linger $USER
+  loginctl show-user $USER -p Linger   # confere: Linger=yes
+  ```
+
+  Depois de reiniciar a máquina, tudo volta sozinho: o Ollama é um serviço do
+  sistema, o Neo4j e o Open WebUI sobem com o Docker
+  (`restart: unless-stopped`) e a API com o serviço `nfse-api`. A VPN do
+  Oracle não sobe sozinha, mas o chat não precisa dela — só a indexação.
+  Com o serviço instalado, não rode `npm run serve` ao mesmo tempo: a porta
+  8000 estará ocupada.
+- **Limitação:** cada mensagem é uma pergunta independente. Perguntas de
+  continuação ("e a outra nota?") ainda não usam o histórico da conversa.
+
 ### Limpeza
 
 ```bash
@@ -494,12 +554,14 @@ Com `" "` os embeddings ficam melhores — nos testes os scores subiram de
 | `src/index.ts` | reindexação completa (ou `SKIP_INGEST`) e o loop de perguntas |
 | `src/indexer.ts` | indexação incremental: só os PDFs ainda não processados |
 | `src/ingest.ts` | processamento de um PDF (chunks, nota, registro em `Documento`) |
+| `src/server.ts` | API de perguntas no formato da OpenAI, com fila, para o Open WebUI |
 | `src/models.ts` | criação dos embeddings e do LLM |
 | `src/oracleCheck.ts` | smoke test isolado do Oracle |
 | `src/ai.ts` | roteamento da pergunta, retrieval (grafo ou trechos) + geração da resposta |
 | `src/nfseSchema.ts` | campos extraídos de cada NFS-e |
 | `src/nfseExtractor.ts` | extração com o LLM + validação de CNPJ, valores, datas e retenções contra o texto |
 | `src/graph.ts` | grafo `Empresa`/`Nota`, gravação e as consultas Cypher de cada rota |
+| `scripts/serve.sh` / `scripts/servico-api.sh` | sobe a API com o Node do nvm e a instala como serviço do systemd |
 | `scripts/indexar.sh` / `scripts/agendar.sh` | rodada agendada (ambiente do cron, trava, logs) e instalação no crontab |
 | `scripts/clean.sh` | remove os artefatos gerados, inclusive os root-owned do container |
 | `ollama/` | Modelfile do LLM local com contexto de 8192 tokens |
