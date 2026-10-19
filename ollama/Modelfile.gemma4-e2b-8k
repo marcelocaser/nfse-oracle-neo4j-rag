@@ -1,0 +1,7 @@
+# LLM local para dados que não podem sair da máquina.
+#   ollama create gemma4-e2b-8k -f ollama/Modelfile.gemma4-e2b-8k
+#
+# O contexto padrão (4096) trunca a resposta: o prompt com topK=8 chunks já
+# ocupa ~3000 tokens, e maxTokens reserva mais 1024.
+FROM gemma4:e2b-it-qat
+PARAMETER num_ctx 8192
