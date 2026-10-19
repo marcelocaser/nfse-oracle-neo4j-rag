@@ -64,13 +64,21 @@ export const CONFIG = Object.freeze({
     output: {
         answersFolder: './respostas',
         fileName: 'resposta',
+        // Perguntas a responder, uma por linha (# comenta). Fica fora do git
+        // porque costuma citar prestadores reais. Sem o arquivo, valem as
+        // perguntas padrão de src/index.ts.
+        questionsFile: process.env.QUESTIONS_FILE?.trim() || './perguntas.txt',
     },
     neo4j: {
         url: process.env.NEO4J_URI!,
         username: process.env.NEO4J_USER!,
         password: process.env.NEO4J_PASSWORD!,
         indexName: "tensors_index",
-        searchType: "vector" as const,
+        // "hybrid" soma a busca por palavra-chave (índice FULLTEXT) à vetorial:
+        // ajuda perguntas com termos exatos (CNPJ, "Retido", nome de empresa).
+        // Os scores dos dois lados são normalizados pelo maior de cada um.
+        searchType: (process.env.SEARCH_TYPE?.trim() === "vector" ? "vector" : "hybrid") as "vector" | "hybrid",
+        keywordIndexName: "chunk_keyword_index",
         textNodeProperties: ["text"],
         nodeLabel: "Chunk",
     },
@@ -152,6 +160,22 @@ export const CONFIG = Object.freeze({
         // modelo ia para a CPU e cada página demorava ~100 s.
         numCtx: 8192,
     } satisfies OcrConfig,
+    extraction: {
+        // Extrai os campos de cada NFS-e na ingestão e monta o grafo
+        // (Empresa)-[:PRESTOU]->(Nota). ~8–12 s por documento com o LLM local.
+        enabled: process.env.EXTRACTION_ENABLED?.trim().toLowerCase() !== "false",
+        // ~4K tokens: cabe no contexto de 8K do gemma4-e2b-8k com o schema e a
+        // resposta. Os campos de uma NFS-e ficam no início do documento.
+        maxChars: 12000,
+        // Linhas do grafo levadas ao contexto da resposta.
+        maxRows: 60,
+    },
+    ingest: {
+        // "true" pula Oracle, OCR e extração e só responde às perguntas sobre o
+        // que já está no Neo4j: segundos em vez dos ~45 min de reindexar 100
+        // PDFs. Útil para testar prompts, rotas e perguntas.
+        skip: process.env.SKIP_INGEST?.trim().toLowerCase() === "true",
+    },
     similarity: {
         // 8 e não 3: a base tem ~28 chunks de 9 notas, e as perguntas agregadas
         // ("quais prestadores aparecem?") precisam alcançar vários documentos.

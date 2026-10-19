@@ -3,7 +3,8 @@ import { StringOutputParser } from "@langchain/core/output_parsers";
 import { ChatPromptTemplate } from "@langchain/core/prompts";
 import { RunnableSequence } from "@langchain/core/runnables";
 import { ChatOpenAI } from "@langchain/openai"
-import type { z } from "zod";
+import { z } from "zod";
+import { formatRows, GRAPH_ROUTES, type GraphRoute } from "./graph.ts";
 
 type DebugLog = (...args: unknown[]) => void;
 type params = {
@@ -20,10 +21,42 @@ type params = {
      */
     outputSchema?: z.ZodType<Record<string, unknown>>,
     structuredOutputMethod?: "functionCalling" | "jsonMode" | "jsonSchema"
+    /**
+     * Com grafo, cada pergunta passa antes por um roteador: as agregadas
+     * ("quais notas têm retenção?") viram Cypher sobre todas as notas; o resto
+     * segue para a busca nos trechos. Sem grafo, só a busca nos trechos.
+     */
+    graph?: {
+        /** LLM com temperatura 0 para classificar a pergunta. */
+        router: ChatOpenAI,
+        /** Teto de linhas no contexto — mantém o prompt dentro do LLM local. */
+        maxRows: number,
+    }
+}
+
+const ROUTE_NAMES: [GraphRoute | "texto_livre", ...(GraphRoute | "texto_livre")[]] =
+    ["texto_livre", ...(Object.keys(GRAPH_ROUTES) as GraphRoute[])];
+
+/**
+ * O LLM só escolhe a rota. Termos da pergunta (nome da empresa, número da
+ * nota) são achados por regra/Cypher: o gemma4 local, pedido a extrair o nome,
+ * copiava a descrição da rota no lugar.
+ */
+const routeSchema = z.object({
+    rota: z.enum(ROUTE_NAMES)
+        .describe("A consulta que responde a pergunta; texto_livre se nenhuma das outras servir"),
+});
+
+/** Número de nota citado na pergunta ("nota 206", "NFS-e nº 202200000000152"). */
+function numeroNaPergunta(pergunta: string): string | null {
+    return pergunta.match(/\b\d{3,}\b/)?.[0] ?? null;
 }
 
 interface ChainState {
     question: string;
+    /** Tabela do grafo, anexada à resposta sem passar pelo LLM. */
+    graphTable?: string;
+    route?: GraphRoute | "texto_livre";
     context?: string;
     topScore?: number;
     error?: string;
@@ -37,6 +70,45 @@ export class AI {
 
     constructor(params: params) {
         this.params = params;
+    }
+
+    async routeQuestion(input: ChainState): Promise<ChainState> {
+        if (!this.params.graph) return { ...input, route: "texto_livre" };
+        const rotas = Object.entries(GRAPH_ROUTES).map(([nome, r]) => `- ${nome}: ${r.descricao}`).join("\n");
+        const { rota } = await this.params.graph.router
+            .withStructuredOutput(routeSchema, { method: "jsonSchema" })
+            .invoke(
+                `Classifique a pergunta sobre notas fiscais de serviço na rota que a responde.\n` +
+                `Rotas:\n${rotas}\n- texto_livre: qualquer outra pergunta\n\nPergunta: ${input.question}`
+            );
+        this.params.debugLog(`🧭 Rota: ${rota}`);
+        return { ...input, route: rota as ChainState["route"] };
+    }
+
+    async retrieveContext(input: ChainState): Promise<ChainState> {
+        if (!input.route || input.route === "texto_livre") return this.retrieveVectorSearchResults(input);
+
+        const { cypher } = GRAPH_ROUTES[input.route];
+        const rows = await this.params.vectorStore.query(cypher, {
+            pergunta: input.question,
+            numero: numeroNaPergunta(input.question),
+        });
+        if (!rows.length) {
+            // Ex.: prestador que não está no grafo, ou campo que o extrator
+            // descartou — os trechos ainda podem ter a resposta.
+            this.params.debugLog(`⚠️  Consulta "${input.route}" sem resultado no grafo — usando a busca nos trechos.`);
+            return this.retrieveVectorSearchResults(input);
+        }
+        this.params.debugLog(`🕸️  ${rows.length} linha(s) do grafo (${input.route}).`);
+        // O teto de linhas vale só para o contexto do LLM (8K no local); a
+        // tabela anexada à resposta vai inteira.
+        const graphTable = formatRows(rows, Number.POSITIVE_INFINITY);
+        const context =
+            `Resultado de uma consulta ao banco com TODAS as notas fiscais indexadas ` +
+            `(${rows.length} linha(s)). Valores em R$. A tabela completa será mostrada ao usuário ` +
+            `logo após a sua resposta: escreva um resumo curto, sem repetir a tabela linha a linha.\n\n` +
+            formatRows(rows, this.params.graph!.maxRows);
+        return { ...input, context, graphTable };
     }
 
     async retrieveVectorSearchResults(input: ChainState): Promise<ChainState> {
@@ -120,15 +192,21 @@ export class AI {
             }
         }
 
+        // Um LLM de 2B esquece linhas ao resumir uma tabela (citou 5 de 8 notas
+        // com retenção): os dados do grafo vão inteiros, direto do banco.
+        const answer = input.graphTable
+            ? `${(rawResponse as string).trim()}\n\n**Dados completos (consulta ao grafo):**\n\n${input.graphTable}`
+            : rawResponse as string;
         return {
             ...input,
-            answer: rawResponse as string
+            answer
         }
     }
 
     async anwerQuestion(question: string) {
         const chain = RunnableSequence.from([
-            this.retrieveVectorSearchResults.bind(this),
+            this.routeQuestion.bind(this),
+            this.retrieveContext.bind(this),
             this.generatedNLPResponse.bind(this),
         ]);
         const result = await chain.invoke({ question })

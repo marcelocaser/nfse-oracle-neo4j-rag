@@ -4,6 +4,7 @@ Pipeline RAG didático:
 
 ```
 Oracle 11g (BLOB)  →  PDF (texto ou OCR) → chunks  →  embeddings locais (Ollama)  →  Neo4j (índice vetorial)  →  perguntas via LLM (Ollama)
+                                       └→ campos da NFS-e (LLM + validação) →  Neo4j (grafo Empresa/Nota)  ↗
 ```
 
 Os PDFs **não** são lidos do disco: cada execução varre registros de uma tabela
@@ -282,6 +283,21 @@ npm start              # 4. pipeline completo
 npm run infra:down
 ```
 
+O `npm start` sempre reindexa do zero: apaga chunks e grafo e relê os PDFs do
+Oracle (~45 min para 100 PDFs com o LLM local). Para refazer só as perguntas
+sobre o que já está no Neo4j, sem Oracle nem VPN:
+
+```bash
+SKIP_INGEST=true npm start
+```
+
+As perguntas são lidas de `perguntas.txt` (ou do arquivo em `QUESTIONS_FILE`),
+uma por linha; linhas vazias e começadas com `#` são ignoradas. O arquivo está
+no `.gitignore` porque costuma citar prestadores reais. Sem ele, valem as
+perguntas padrão de `src/index.ts`. Cada resposta vai para
+`respostas/resposta-<nº>-<timestamp>.md`, com o nº na ordem do arquivo. Não rode as duas formas ao mesmo
+tempo: a reindexação apaga o grafo que a outra está consultando.
+
 ### Limpeza
 
 ```bash
@@ -321,6 +337,71 @@ As respostas geradas são salvas em `./respostas/`.
 > apontar o exemplo para outra base de PDFs, ajuste ambos: perguntas fora do
 > domínio do documento produzem scores de similaridade perto do threshold
 > (0.5, em `src/ai.ts`) e respostas sem utilidade.
+
+### Grafo das NFS-e e roteamento de perguntas
+
+A busca vetorial só entrega ao LLM os `topK` (8) trechos mais parecidos com a
+pergunta. Com 100 documentos isso quebra perguntas sobre o conjunto: em
+"alguma nota tem retenção?", os trechos com retenção ficavam nas posições
+31–39 e a resposta afirmava, errado, que não havia nenhuma.
+
+Por isso, na ingestão, cada documento também vira um nó no grafo:
+
+```
+(:Empresa {nome, documento})-[:PRESTOU]->(:Nota {numero, dataEmissao, valorTotal,
+    issRetido, irrfRetido, municipio, uf, tipoServico})-[:TOMADA_POR]->(:Empresa)
+(:Nota)-[:TEM_TRECHO]->(:Chunk)
+```
+
+1. **Extração** (`src/nfseExtractor.ts`): o LLM lê **uma nota por vez** (cabe
+   nos 8K de contexto do LLM local) e devolve os campos do `src/nfseSchema.ts`
+   via `response_format` (`jsonSchema`).
+2. **Validação por regra**, porque o modelo pequeno erra campos de formato
+   fixo. Nada que não se confirme no texto entra no grafo:
+   - CNPJ/CPF com dígito verificador válido e presente no texto. Se o LLM
+     devolver outro número (nos testes, a inscrição municipal), o CNPJ é
+     procurado no texto perto do nome da empresa;
+   - valores e datas precisam aparecer no texto;
+   - valor retido > 0 precisa estar junto do rótulo certo ("ISSQN Retido",
+     "IRRF"…) — descarta, por exemplo, o IRRF "copiado" do ISS numa nota que
+     nem tem campo de IR — e respeitar o teto legal: ISS até 5% do valor da
+     nota (LC 116/2003) e IR até 27,5%;
+   - nome de empresa não pode ser cabeçalho de prefeitura, endereço ou
+     descrição do serviço, e precisa estar perto do próprio CNPJ no texto;
+     se o CNPJ de cada parte estiver junto do nome da outra, os nomes são
+     trocados de volta.
+   Os descartes aparecem no log (`↳ ...`).
+4. **Correção pelo conjunto** (`corrigirPapeisPeloConjunto` em
+   `src/graph.ts`), depois da ingestão: uma empresa que é tomadora na grande
+   maioria das notas (≥ 5 e mais que o dobro das vezes em que aparece como
+   prestadora) passa a tomadora também nas notas em que saiu como prestadora,
+   e a outra parte vira a prestadora. Resolve os papéis trocados por inteiro,
+   que o texto de um documento sozinho não resolve.
+3. **Roteamento** (`src/ai.ts`): o LLM só classifica a pergunta numa rota fixa
+   (`prestadores`, `municipios`, `tipos_servico`, `retencoes`,
+   `nota_especifica`, `texto_livre`) — ele **não escreve Cypher nem extrai
+   termos**. As rotas rodam consultas prontas (`src/graph.ts`) sobre todas as
+   notas; em `nota_especifica` o próprio Cypher acha a empresa cujo nome (duas
+   primeiras palavras) aparece na pergunta, ou o número da nota citado.
+   `texto_livre`, ou uma consulta sem resultado, cai na busca nos trechos.
+   O LLM escreve um resumo curto e a **tabela do grafo é anexada à resposta
+   sem passar por ele**: o modelo de 2B citava 5 das 8 notas com retenção.
+
+Consultas úteis no Neo4j Browser:
+
+```cypher
+// notas com retenção
+MATCH (p:Empresa)-[:PRESTOU]->(n:Nota) WHERE n.issRetido > 0 OR n.irrfRetido > 0
+RETURN p.nome, n.numero, n.issRetido, n.irrfRetido;
+
+// a nota e os trechos de onde ela veio
+MATCH (n:Nota {numero: '202200000000152'})-[:TEM_TRECHO]->(c:Chunk) RETURN n, c;
+```
+
+Limitações conhecidas (LLM local `gemma4-e2b-8k`): o `tipoServico` às vezes
+erra entre comissão e premiação, e campos que a validação descarta ficam
+vazios (a nota continua no grafo, só sem aquele campo). A regra não corrige
+interpretação — só confere o que está escrito.
 
 ### Qualidade da extração de texto
 
@@ -369,7 +450,10 @@ Com `" "` os embeddings ficam melhores — nos testes os scores subiram de
 | `src/ocr.ts` | OCR de PDFs sem texto: `pdftoppm` → PNG → `glm-ocr` no Ollama |
 | `src/index.ts` | orquestra ingestão em lote e o loop de perguntas |
 | `src/oracleCheck.ts` | smoke test isolado do Oracle |
-| `src/ai.ts` | retrieval no Neo4j + geração da resposta |
+| `src/ai.ts` | roteamento da pergunta, retrieval (grafo ou trechos) + geração da resposta |
+| `src/nfseSchema.ts` | campos extraídos de cada NFS-e |
+| `src/nfseExtractor.ts` | extração com o LLM + validação de CNPJ, valores, datas e retenções contra o texto |
+| `src/graph.ts` | grafo `Empresa`/`Nota`, gravação e as consultas Cypher de cada rota |
 | `scripts/clean.sh` | remove os artefatos gerados, inclusive os root-owned do container |
 | `ollama/` | Modelfile do LLM local com contexto de 8192 tokens |
 | `prompts/` | `answerPrompt.json` (role/task/instruções) e `template.txt` |

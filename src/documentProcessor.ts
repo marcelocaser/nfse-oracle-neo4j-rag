@@ -35,6 +35,8 @@ export function normalizeExtractedText(text: string): string {
 export class DocumentProcessor {
     private record: PdfRecord;
     private textSplitterConfig: TextSplitterConfig;
+    /** Texto do documento inteiro (após OCR, se houve), para a extração de campos. */
+    fullText = "";
 
     constructor(record: PdfRecord, textSplitterConfig: TextSplitterConfig) {
         this.record = record;
@@ -63,6 +65,8 @@ export class DocumentProcessor {
         if (extractedLength < MIN_TEXT_LENGTH && CONFIG.ocr.enabled) {
             rawDocuments = await this.loadWithOcr();
         }
+
+        this.fullText = rawDocuments.map(doc => doc.pageContent).join("\n\n");
 
         const splitter = new RecursiveCharacterTextSplitter(
             this.textSplitterConfig
