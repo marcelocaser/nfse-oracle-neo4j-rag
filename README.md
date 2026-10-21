@@ -4,6 +4,7 @@ Pipeline RAG didático:
 
 ```
 Oracle 11g (BLOB)  →  PDF (texto ou OCR) → chunks  →  embeddings locais (Ollama)  →  Neo4j (índice vetorial)  →  perguntas via LLM (Ollama)
+                                       └→ campos da NFS-e (LLM + validação) →  Neo4j (grafo Empresa/Nota)  ↗
 ```
 
 Os PDFs **não** são lidos do disco: cada execução varre registros de uma tabela
@@ -282,6 +283,138 @@ npm start              # 4. pipeline completo
 npm run infra:down
 ```
 
+O `npm start` sempre reindexa do zero: apaga chunks e grafo e relê os PDFs do
+Oracle (~45 min para 100 PDFs com o LLM local). Para refazer só as perguntas
+sobre o que já está no Neo4j, sem Oracle nem VPN:
+
+```bash
+SKIP_INGEST=true npm start
+```
+
+As perguntas são lidas de `perguntas.txt` (ou do arquivo em `QUESTIONS_FILE`),
+uma por linha; linhas vazias e começadas com `#` são ignoradas. O arquivo está
+no `.gitignore` porque costuma citar prestadores reais. Sem ele, valem as
+perguntas padrão de `src/index.ts`. Cada resposta vai para
+`respostas/resposta-<nº>-<timestamp>.md`, com o nº na ordem do arquivo. Não rode as duas formas ao mesmo
+tempo: a reindexação apaga o grafo que a outra está consultando.
+
+### Indexação incremental e agendada
+
+A tabela de PDFs recebe arquivos novos o tempo todo. Em vez de reindexar tudo,
+`npm run index` processa só os documentos que ainda não estão no Neo4j, sem
+apagar nada:
+
+- **Pendentes = IDs do Oracle − IDs já processados.** Por ser diferença de
+  conjuntos (e não "maior ID visto"), pega também o acervo antigo e linhas
+  gravadas fora de ordem.
+- **Do mais novo para o mais antigo:** os documentos do dia entram primeiro e o
+  acervo antigo vai sendo consumido nas rodadas seguintes.
+- **Limites por rodada:** `INGEST_MAX_MINUTES` (padrão 300) e `INGEST_MAX_DOCS`.
+  O documento em andamento termina; o resto fica para a próxima rodada.
+  `INGEST_SINCE=aaaa-mm-dd` limita o acervo pela data de inclusão
+  (`ORACLE_PDF_DATE_COLUMN`).
+- **Reprocessar documentos já indexados** (ex.: depois de corrigir o extrator):
+  `INGEST_REPROCESS=15027,15032 bash scripts/indexar.sh`. A rodada processa só
+  esses IDs e substitui os chunks e a nota antigos.
+- **Todo documento processado é registrado** em `(:Documento {oracleId, status})`,
+  inclusive os que não viraram nota (`sem_texto`, `nao_nfse`, `falha_extracao`),
+  para não serem tentados de novo a cada rodada.
+- Ao fim de cada rodada as correções pelo conjunto rodam de novo sobre o grafo
+  inteiro (elas só mexem no que está errado).
+
+Para agendar no crontab do usuário (sem sudo):
+
+```bash
+npm run index:schedule                    # todo dia às 02:00
+npm run index:schedule -- "30 1 * * 1-5"  # outro horário (formato do cron)
+npm run index:schedule -- --status
+npm run index:schedule -- --remover
+```
+
+O agendamento chama `scripts/indexar.sh`, que carrega o Node 22 do nvm e o
+Instant Client (o cron não lê o perfil do shell), impede duas rodadas ao mesmo
+tempo e grava `logs/indexacao-AAAA-MM-DD.log` (fora do git; mantidos 30 dias).
+Para rodar agora com o mesmo log: `bash scripts/indexar.sh`.
+
+O LLM e os limites vêm do `.env`. Para manter os dados locais, deixe nele
+`NLP_MODEL=gemma4-e2b-8k` e `LLM_REASONING_EFFORT=none`. Na hora agendada a
+máquina precisa estar ligada (sem suspender), com a VPN do Oracle, o Neo4j e o
+Ollama no ar.
+
+### Chat na rede local (API + Open WebUI)
+
+Para outras pessoas fazerem perguntas pelo navegador, sem `npm start`:
+
+```
+navegador (rede local) ──► Open WebUI :3000 ──► API :8000 (127.0.0.1) ──► Neo4j + Ollama
+                           login e histórico     roteador, grafo, trechos
+```
+
+```bash
+npm run serve      # 1. API de perguntas (deixe rodando) — ou instale como serviço, abaixo
+npm run chat:up    # 2. Open WebUI em http://<ip-desta-máquina>:3000
+npm run chat:down  #    para o Open WebUI
+```
+
+- **API (`src/server.ts`)**: formato da API da OpenAI (`/v1/models`,
+  `/v1/chat/completions`, com e sem stream) e `/health`. Exige a chave
+  `RAG_API_KEY` e só escuta em `127.0.0.1`. Atende **uma pergunta por vez**
+  (a GPU não comporta duas); até `API_MAX_QUEUE` esperam na fila, acima disso
+  a resposta é 503.
+- **Open WebUI**: o **primeiro cadastro vira administrador** e o cadastro se
+  fecha; as contas seguintes ficam pendentes até o administrador aprovar
+  (Painel de administração → Usuários). O único modelo é o `nfse`: a
+  conexão direta com o Ollama está desligada, e as tarefas de fundo (título,
+  tags, sugestões, autocompletar) também, porque ocupariam a fila da GPU.
+- A configuração do Open WebUI vem do `docker-compose.yml`
+  (`ENABLE_PERSISTENT_CONFIG=false`): ajustes feitos no painel voltam ao valor
+  do compose quando o container reinicia. Usuários e conversas ficam em
+  `open-webui/` (fora do git).
+- O Neo4j, a API e o Ollama só aceitam conexões desta máquina; na rede, só a
+  porta do Open WebUI (`WEBUI_PORT`, padrão 3000).
+- **API como serviço** (sobe com a máquina e reinicia sozinha se cair):
+
+  ```bash
+  npm run api:service                  # instala/atualiza e (re)inicia (systemd do usuário)
+  npm run api:service -- --status      # estado e últimas linhas do log
+  npm run api:service -- --remover     # para e remove o serviço
+  journalctl --user -u nfse-api -f     # log ao vivo das perguntas
+  ```
+
+  A API lê o código e o `.env` só ao iniciar: depois de um `git pull` ou de
+  mudar o `.env`, rode `npm run api:service` de novo para reiniciá-la.
+
+  Sem *linger*, o serviço do usuário só sobe quando você faz login. Para subir
+  no boot mesmo sem ninguém logado, rode uma vez (pede sudo):
+
+  ```bash
+  sudo loginctl enable-linger $USER
+  loginctl show-user $USER -p Linger   # confere: Linger=yes
+  ```
+
+  Depois de reiniciar a máquina, tudo volta sozinho: o Ollama é um serviço do
+  sistema, o Neo4j e o Open WebUI sobem com o Docker
+  (`restart: unless-stopped`) e a API com o serviço `nfse-api`. A VPN do
+  Oracle não sobe sozinha, mas o chat não precisa dela — só a indexação.
+  Com o serviço instalado, não rode `npm run serve` ao mesmo tempo: a porta
+  8000 estará ocupada.
+- **Histórico da conversa:** perguntas de continuação funcionam. Antes da
+  cadeia, a pergunta é reescrita com as últimas `API_HISTORY_TURNS` trocas
+  (padrão 3; `0` desliga):
+
+  | Conversa | Pergunta que a cadeia recebe |
+  |---|---|
+  | "Quais prestadores aparecem?" → "Dados da nota do **segundo** da lista?" | "Quais os dados da nota do *NOME DO 2º DA LISTA*?" |
+  | "Dados da nota 152?" → "E o ISS retido **dela**?" | "Qual o ISS retido na nota 152?" |
+  | qualquer conversa → "Em quais municípios os serviços foram prestados?" | igual (pergunta completa não é reescrita) |
+
+  Só passa pelo reescritor (LLM, temperatura 0) a pergunta com referência à
+  conversa — pronome ("dela", "dessa"), ordinal ("o segundo"), "a outra",
+  começar com "E…" — ou bem curta. Ordinais são resolvidos por regra, na
+  lista em negrito mais recente da conversa: contar itens é onde o LLM de 2B
+  mais erra. A pergunta reescrita aparece no log (`💬`). Cada continuação
+  custa ~2 s a mais.
+
 ### Limpeza
 
 ```bash
@@ -321,6 +454,82 @@ As respostas geradas são salvas em `./respostas/`.
 > apontar o exemplo para outra base de PDFs, ajuste ambos: perguntas fora do
 > domínio do documento produzem scores de similaridade perto do threshold
 > (0.5, em `src/ai.ts`) e respostas sem utilidade.
+
+### Grafo das NFS-e e roteamento de perguntas
+
+A busca vetorial só entrega ao LLM os `topK` (8) trechos mais parecidos com a
+pergunta. Com 100 documentos isso quebra perguntas sobre o conjunto: em
+"alguma nota tem retenção?", os trechos com retenção ficavam nas posições
+31–39 e a resposta afirmava, errado, que não havia nenhuma.
+
+Por isso, na ingestão, cada documento também vira um nó no grafo:
+
+```
+(:Empresa {nome, documento})-[:PRESTOU]->(:Nota {numero, dataEmissao, valorTotal,
+    issRetido, irrfRetido, municipio, uf, tipoServico})-[:TOMADA_POR]->(:Empresa)
+(:Nota)-[:TEM_TRECHO]->(:Chunk)
+```
+
+1. **Extração** (`src/nfseExtractor.ts`): o LLM lê **uma nota por vez** (cabe
+   nos 8K de contexto do LLM local) e devolve os campos do `src/nfseSchema.ts`
+   via `response_format` (`jsonSchema`).
+2. **Validação por regra**, porque o modelo pequeno erra campos de formato
+   fixo. Nada que não se confirme no texto entra no grafo:
+   - CNPJ/CPF com dígito verificador válido e presente no texto. Se o LLM
+     devolver outro número (nos testes, a inscrição municipal), o CNPJ é
+     procurado no texto perto do nome da empresa;
+   - valores e datas precisam aparecer no texto;
+   - valor retido > 0 precisa estar junto do rótulo certo ("ISSQN Retido",
+     "IRRF"…) — descarta, por exemplo, o IRRF "copiado" do ISS numa nota que
+     nem tem campo de IR — e respeitar o teto legal: ISS até 5% do valor da
+     nota (LC 116/2003) e IR até 27,5%;
+   - nome de empresa não pode ser cabeçalho de prefeitura, endereço ou
+     descrição do serviço, e precisa estar perto do próprio CNPJ no texto;
+     se o CNPJ de cada parte estiver junto do nome da outra, os nomes são
+     trocados de volta.
+   Os descartes aparecem no log (`↳ ...`).
+4. **Correção pelo conjunto** (`corrigirPapeisPeloConjunto` em
+   `src/graph.ts`), depois da ingestão: uma empresa que é tomadora na grande
+   maioria das notas (≥ 5 e mais que o dobro das vezes em que aparece como
+   prestadora) passa a tomadora também nas notas em que saiu como prestadora,
+   e a outra parte vira a prestadora. Resolve os papéis trocados por inteiro,
+   que o texto de um documento sozinho não resolve.
+3. **Roteamento** (`src/ai.ts`): o LLM só classifica a pergunta numa rota fixa
+   (`prestadores`, `municipios`, `tipos_servico`, `retencoes`,
+   `nota_especifica`, `notas_por_periodo`, `texto_livre`) — ele **não escreve Cypher nem extrai
+   termos**. As rotas rodam consultas prontas (`src/graph.ts`) sobre todas as
+   notas; em `nota_especifica` o próprio Cypher acha a empresa cujo nome (duas
+   primeiras palavras) aparece na pergunta, ou o número da nota citado.
+   `texto_livre`, ou uma consulta sem resultado, cai na busca nos trechos.
+   O LLM escreve um resumo curto e a **tabela do grafo é anexada à resposta
+   sem passar por ele**: o modelo de 2B citava 5 das 8 notas com retenção.
+4. **Período** (`src/periodo.ts`): datas da pergunta saem por regra e filtram
+   **todas** as rotas pela data de emissão (`dataEmissaoIso`) — "retenções
+   neste mês", "prestadores em outubro". Entende `01/10`, `01/10/2026`,
+   "de 01/10 até hoje", "desde 05/10", "até 10/10", "em outubro (de 2025)",
+   "neste mês", "mês passado", "últimos 7 dias", "hoje", "ontem", "este ano",
+   "ano passado", "em 2025". Sem ano, vale o corrente (ou o anterior, se a data
+   ainda não chegou). Pergunta com data que o roteador manda para
+   `texto_livre` — ou `nota_especifica` sem resultado — vira
+   `notas_por_periodo`; sem nenhuma nota no período, a resposta diz isso, sem
+   cair na busca nos trechos (que não filtra datas). O período vale para a data
+   de **emissão** da nota, não para a de inclusão no Oracle (`INGEST_SINCE`).
+
+Consultas úteis no Neo4j Browser:
+
+```cypher
+// notas com retenção
+MATCH (p:Empresa)-[:PRESTOU]->(n:Nota) WHERE n.issRetido > 0 OR n.irrfRetido > 0
+RETURN p.nome, n.numero, n.issRetido, n.irrfRetido;
+
+// a nota e os trechos de onde ela veio
+MATCH (n:Nota {numero: '202200000000152'})-[:TEM_TRECHO]->(c:Chunk) RETURN n, c;
+```
+
+Limitações conhecidas (LLM local `gemma4-e2b-8k`): o `tipoServico` às vezes
+erra entre comissão e premiação, e campos que a validação descarta ficam
+vazios (a nota continua no grafo, só sem aquele campo). A regra não corrige
+interpretação — só confere o que está escrito.
 
 ### Qualidade da extração de texto
 
@@ -367,9 +576,19 @@ Com `" "` os embeddings ficam melhores — nos testes os scores subiram de
 | `src/oracle.ts` | Thick mode + pool + leitura dos BLOBs como `AsyncGenerator<PdfRecord>` |
 | `src/documentProcessor.ts` | BLOB → páginas de PDF → chunks, com metadata rastreável |
 | `src/ocr.ts` | OCR de PDFs sem texto: `pdftoppm` → PNG → `glm-ocr` no Ollama |
-| `src/index.ts` | orquestra ingestão em lote e o loop de perguntas |
+| `src/index.ts` | reindexação completa (ou `SKIP_INGEST`) e o loop de perguntas |
+| `src/indexer.ts` | indexação incremental: só os PDFs ainda não processados |
+| `src/ingest.ts` | processamento de um PDF (chunks, nota, registro em `Documento`) |
+| `src/server.ts` | API de perguntas no formato da OpenAI, com fila, para o Open WebUI |
+| `src/models.ts` | criação dos embeddings e do LLM |
 | `src/oracleCheck.ts` | smoke test isolado do Oracle |
-| `src/ai.ts` | retrieval no Neo4j + geração da resposta |
+| `src/ai.ts` | roteamento da pergunta, retrieval (grafo ou trechos) + geração da resposta |
+| `src/nfseSchema.ts` | campos extraídos de cada NFS-e |
+| `src/nfseExtractor.ts` | extração com o LLM + validação de CNPJ, valores, datas e retenções contra o texto |
+| `src/graph.ts` | grafo `Empresa`/`Nota`, gravação e as consultas Cypher de cada rota |
+| `src/periodo.ts` | período de emissão citado na pergunta ("de 01/10 até hoje", "em outubro") |
+| `scripts/serve.sh` / `scripts/servico-api.sh` | sobe a API com o Node do nvm e a instala como serviço do systemd |
+| `scripts/indexar.sh` / `scripts/agendar.sh` | rodada agendada (ambiente do cron, trava, logs) e instalação no crontab |
 | `scripts/clean.sh` | remove os artefatos gerados, inclusive os root-owned do container |
 | `ollama/` | Modelfile do LLM local com contexto de 8192 tokens |
 | `prompts/` | `answerPrompt.json` (role/task/instruções) e `template.txt` |

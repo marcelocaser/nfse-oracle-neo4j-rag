@@ -24,6 +24,8 @@ export interface OracleConfig {
     idColumn: string;
     nameColumn: string;
     blobColumn: string;
+    /** Data de inclusão da linha (ex.: INCLUIDO_EM). Opcional; usada por INGEST_SINCE. */
+    dateColumn?: string;
     /** Sobrescreve a query montada. Deve retornar ID, NAME, DATA e usar o bind :maxDocs. */
     query?: string;
     maxDocs: number;
@@ -58,19 +60,43 @@ function positiveInt(value: string | undefined, envName: string, fallback: numbe
     return parsed;
 }
 
+function idList(value: string | undefined, envName: string): string[] {
+    const ids = (value ?? "").split(",").map(id => id.trim()).filter(Boolean);
+    const invalid = ids.find(id => !/^\d+$/.test(id));
+    if (invalid) throw new Error(`${envName}: "${invalid}" não é um ID numérico.`);
+    return ids;
+}
+
+function isoDate(value: string | undefined, envName: string): string | undefined {
+    if (!value?.trim()) return undefined;
+    const resolved = value.trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(resolved) || Number.isNaN(Date.parse(resolved))) {
+        throw new Error(`${envName}="${value}" deve ser uma data no formato aaaa-mm-dd.`);
+    }
+    return resolved;
+}
+
 export const CONFIG = Object.freeze({
     promptConfig: JSON.parse(readFileSync(promptsFiles.answerPrompt, 'utf-8')),
     templateText: readFileSync(promptsFiles.template, 'utf-8'),
     output: {
         answersFolder: './respostas',
         fileName: 'resposta',
+        // Perguntas a responder, uma por linha (# comenta). Fica fora do git
+        // porque costuma citar prestadores reais. Sem o arquivo, valem as
+        // perguntas padrão de src/index.ts.
+        questionsFile: process.env.QUESTIONS_FILE?.trim() || './perguntas.txt',
     },
     neo4j: {
         url: process.env.NEO4J_URI!,
         username: process.env.NEO4J_USER!,
         password: process.env.NEO4J_PASSWORD!,
         indexName: "tensors_index",
-        searchType: "vector" as const,
+        // "hybrid" soma a busca por palavra-chave (índice FULLTEXT) à vetorial:
+        // ajuda perguntas com termos exatos (CNPJ, "Retido", nome de empresa).
+        // Os scores dos dois lados são normalizados pelo maior de cada um.
+        searchType: (process.env.SEARCH_TYPE?.trim() === "vector" ? "vector" : "hybrid") as "vector" | "hybrid",
+        keywordIndexName: "chunk_keyword_index",
         textNodeProperties: ["text"],
         nodeLabel: "Chunk",
     },
@@ -109,6 +135,9 @@ export const CONFIG = Object.freeze({
         idColumn: identifier(process.env.ORACLE_PDF_ID_COLUMN, 'ORACLE_PDF_ID_COLUMN', 'ID'),
         nameColumn: identifier(process.env.ORACLE_PDF_NAME_COLUMN, 'ORACLE_PDF_NAME_COLUMN', 'NOME'),
         blobColumn: identifier(process.env.ORACLE_PDF_BLOB_COLUMN, 'ORACLE_PDF_BLOB_COLUMN', 'ARQUIVO'),
+        dateColumn: process.env.ORACLE_PDF_DATE_COLUMN?.trim()
+            ? identifier(process.env.ORACLE_PDF_DATE_COLUMN, 'ORACLE_PDF_DATE_COLUMN', '')
+            : undefined,
         query: process.env.ORACLE_PDF_QUERY?.trim() || undefined,
         maxDocs: positiveInt(process.env.ORACLE_PDF_MAX_DOCS, 'ORACLE_PDF_MAX_DOCS', 10),
         poolMin: positiveInt(process.env.ORACLE_POOL_MIN, 'ORACLE_POOL_MIN', 1),
@@ -152,6 +181,57 @@ export const CONFIG = Object.freeze({
         // modelo ia para a CPU e cada página demorava ~100 s.
         numCtx: 8192,
     } satisfies OcrConfig,
+    extraction: {
+        // Extrai os campos de cada NFS-e na ingestão e monta o grafo
+        // (Empresa)-[:PRESTOU]->(Nota). ~8–12 s por documento com o LLM local.
+        enabled: process.env.EXTRACTION_ENABLED?.trim().toLowerCase() !== "false",
+        // ~4K tokens: cabe no contexto de 8K do gemma4-e2b-8k com o schema e a
+        // resposta. Os campos de uma NFS-e ficam no início do documento.
+        maxChars: 12000,
+        // Linhas do grafo levadas ao contexto da resposta.
+        maxRows: 60,
+    },
+    ingest: {
+        // "true" pula Oracle, OCR e extração e só responde às perguntas sobre o
+        // que já está no Neo4j: segundos em vez dos ~45 min de reindexar 100
+        // PDFs. Útil para testar prompts, rotas e perguntas.
+        skip: process.env.SKIP_INGEST?.trim().toLowerCase() === "true",
+        // Indexação incremental (npm run index): para de pegar documentos novos
+        // depois deste tempo, para a rodada da madrugada não invadir o
+        // expediente. O documento em andamento termina.
+        maxMinutes: positiveInt(process.env.INGEST_MAX_MINUTES, 'INGEST_MAX_MINUTES', 300),
+        // Teto de documentos por rodada; vazio = sem teto (só o de tempo).
+        maxDocs: process.env.INGEST_MAX_DOCS?.trim()
+            ? positiveInt(process.env.INGEST_MAX_DOCS, 'INGEST_MAX_DOCS', 1)
+            : Number.POSITIVE_INFINITY,
+        // Só documentos incluídos a partir desta data (aaaa-mm-dd), pela coluna
+        // ORACLE_PDF_DATE_COLUMN. Vazio = o acervo inteiro, dos mais novos aos
+        // mais antigos.
+        since: isoDate(process.env.INGEST_SINCE, 'INGEST_SINCE'),
+        // IDs a reprocessar mesmo já indexados (ex.: "15027,15032"), depois de
+        // uma correção no extrator. Com a lista, a rodada processa só eles.
+        reprocess: idList(process.env.INGEST_REPROCESS, 'INGEST_REPROCESS'),
+    },
+    api: {
+        // Servidor de perguntas (npm run serve), no formato da API da OpenAI
+        // para o Open WebUI. Só escuta na própria máquina: quem fica exposto na
+        // rede é o Open WebUI, com login.
+        host: process.env.API_HOST?.trim() || "127.0.0.1",
+        port: positiveInt(process.env.API_PORT, 'API_PORT', 8000),
+        // Chave que o Open WebUI manda em "Authorization: Bearer ...".
+        key: process.env.RAG_API_KEY?.trim() || "",
+        // Nome do "modelo" que aparece no Open WebUI.
+        modelName: process.env.API_MODEL_NAME?.trim() || "nfse",
+        // A GPU atende uma pergunta por vez; acima disso a API responde 503
+        // em vez de deixar a pessoa esperando minutos.
+        maxQueue: positiveInt(process.env.API_MAX_QUEUE, 'API_MAX_QUEUE', 10),
+        // Trocas anteriores (pergunta + resposta) usadas para entender uma
+        // pergunta de continuação ("e o valor dela?"). 0 desliga o histórico:
+        // cada mensagem vira uma pergunta independente.
+        historyTurns: process.env.API_HISTORY_TURNS?.trim() === "0"
+            ? 0
+            : positiveInt(process.env.API_HISTORY_TURNS, 'API_HISTORY_TURNS', 3),
+    },
     similarity: {
         // 8 e não 3: a base tem ~28 chunks de 9 notas, e as perguntas agregadas
         // ("quais prestadores aparecem?") precisam alcançar vários documentos.
