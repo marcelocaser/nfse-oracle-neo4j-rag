@@ -36,6 +36,8 @@ type params = {
     graph?: {
         /** LLM com temperatura 0 para classificar a pergunta. */
         router: ChatOpenAI,
+        /** jsonSchema no LLM local; functionCalling nos ":cloud" (ver config.ts). */
+        schemaMethod: "jsonSchema" | "functionCalling",
         /** Teto de linhas no contexto — mantém o prompt dentro do LLM local. */
         maxRows: number,
     }
@@ -68,6 +70,9 @@ function textoParaBuscaPorPalavra(pergunta: string): string {
 
 /** Teto de "notas mais recentes" quando a pergunta não cita período. */
 const NOTAS_MAIS_RECENTES = 20;
+
+/** Tentativas de classificar a pergunta antes de cair em texto_livre. */
+const TENTATIVAS_ROTEADOR = 2;
 
 /** Número de nota citado na pergunta ("nota 206", "NFS-e nº 202200000000152"). */
 function numeroNaPergunta(pergunta: string): string | null {
@@ -235,12 +240,24 @@ export class AI {
     async routeQuestion(input: ChainState): Promise<ChainState> {
         if (!this.params.graph) return { ...input, route: "texto_livre" };
         const rotas = Object.entries(GRAPH_ROUTES).map(([nome, r]) => `- ${nome}: ${r.descricao}`).join("\n");
-        const { rota } = await this.params.graph.router
-            .withStructuredOutput(routeSchema, { method: "jsonSchema" })
-            .invoke(
-                `Classifique a pergunta sobre notas fiscais de serviço na rota que a responde.\n` +
-                `Rotas:\n${rotas}\n- texto_livre: qualquer outra pergunta\n\nPergunta: ${input.question}`
-            );
+        const classificador = this.params.graph.router
+            .withStructuredOutput(routeSchema, { method: this.params.graph.schemaMethod });
+        const prompt =
+            `Classifique a pergunta sobre notas fiscais de serviço na rota que a responde.\n` +
+            `Rotas:\n${rotas}\n- texto_livre: qualquer outra pergunta\n\nPergunta: ${input.question}`;
+        // Modelos ":cloud" às vezes respondem sem a chamada de função (~1 em
+        // 12 no minimax-m3.1-flash): tenta de novo e, se falhar, segue pela
+        // busca nos trechos em vez de derrubar a pergunta.
+        let rota: z.infer<typeof routeSchema>["rota"] = "texto_livre";
+        for (let tentativa = 1; tentativa <= TENTATIVAS_ROTEADOR; tentativa++) {
+            try {
+                const resultado = await classificador.invoke(prompt);
+                if (resultado?.rota) { rota = resultado.rota; break; }
+                throw new Error("resposta sem a rota");
+            } catch (error) {
+                this.params.debugLog(`⚠️  Roteador falhou (${(error as Error).message}) — tentativa ${tentativa}/${TENTATIVAS_ROTEADOR}.`);
+            }
+        }
         const periodo = periodoNaPergunta(input.question);
         // Pergunta com data que o roteador não soube encaixar é pergunta por
         // período: a busca nos trechos não filtra datas.
@@ -368,7 +385,7 @@ export class AI {
                 .pipe(this.params.nlpModel)
                 .pipe(new StringOutputParser())
 
-        const rawResponse = await responseChain.invoke({
+        const variaveis = {
             role: this.params.promptConfig.role,
             task: this.params.promptConfig.task,
             tone: this.params.promptConfig.constraints.tone,
@@ -379,7 +396,16 @@ export class AI {
             ).join('\n'),
             question: input.question,
             context: input.context
-        })
+        };
+        let rawResponse = await responseChain.invoke(variaveis);
+        // Modelos ":cloud" com raciocínio às vezes devolvem o texto vazio.
+        // Se foi por estourar o teto de tokens (LLM_MAX_TOKENS), repetir não
+        // adianta; nos demais casos uma nova tentativa costuma resolver.
+        if (!outputSchema && !(rawResponse as string).trim()) {
+            this.params.debugLog(
+                `⚠️  Resposta vazia do LLM — tentando de novo (se persistir, aumente LLM_MAX_TOKENS; hoje ${this.params.nlpModel.maxTokens}).`);
+            rawResponse = await responseChain.invoke(variaveis);
+        }
 
         // Com schema vem um objeto; serializamos para `answer` de modo que o
         // restante do fluxo (impressão e gravação em disco) siga igual.
@@ -394,9 +420,10 @@ export class AI {
 
         // Um LLM de 2B esquece linhas ao resumir uma tabela (citou 5 de 8 notas
         // com retenção): os dados do grafo vão inteiros, direto do banco.
+        const texto = (rawResponse as string).trim();
         const answer = input.graphTable
-            ? `${(rawResponse as string).trim()}${MARCA_TABELA_GRAFO}\n\n${input.graphTable}`
-            : rawResponse as string;
+            ? `${texto || "Não consegui resumir o resultado; segue a consulta completa."}${MARCA_TABELA_GRAFO}\n\n${input.graphTable}`
+            : texto || "Não consegui gerar uma resposta. Tente perguntar de novo.";
         return {
             ...input,
             answer

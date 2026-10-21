@@ -114,6 +114,30 @@ ollama run gemma4:cloud      # teste rápido do LLM — /bye para sair
   trechos recuperados do Neo4j são enviados à nuvem do Ollama. Se os dados não
   puderem sair da máquina, use o LLM local abaixo.
 
+Para testar outro modelo `:cloud` sem editar o `.env`, sobrescreva na linha de
+comando — `NLP_MODEL=minimax-m3.1-flash:cloud npm start` (com
+`SKIP_INGEST=true`, só as perguntas vão à nuvem, não os PDFs).
+
+- **Saída estruturada** (`LLM_STRUCTURED_OUTPUT`): o roteador e o extrator
+  pedem JSON com schema. O Ollama local impõe o schema (`jsonSchema`); os
+  modelos `:cloud` o ignoram e respondem em texto ("Rota: **prestadores**."),
+  então para eles vai por chamada de função (`functionCalling`). Vazio =
+  automático pelo sufixo `:cloud`. Se o modelo ainda responder sem a chamada
+  (~1 em 12 no MiniMax), o roteador tenta de novo e, na falha, usa a busca
+  nos trechos.
+- **Teto de tokens** (`LLM_MAX_TOKENS`): nos `:cloud` o raciocínio do modelo
+  conta no teto e o `LLM_REASONING_EFFORT=none` não o desliga. Com 1024, o
+  MiniMax gastava tudo pensando na tabela de 70 prestadores e a resposta vinha
+  **vazia** (`finish_reason=length`); usou ~3000. Vazio = 8192 nos `:cloud` e
+  1024 no LLM local.
+- **`LLM_REASONING_EFFORT` nos `:cloud`: use `low`, não `none`.** O MiniMax
+  não reconhece `none` e raciocina como sem ajuste: numa tabela de 57
+  municípios, ~4000 tokens e 40 s com `none`, ~2200 e 20 s com `low`:
+
+  ```bash
+  NLP_MODEL=minimax-m3.1-flash:cloud LLM_REASONING_EFFORT=low npm start
+  ```
+
 O código chama o servidor local (`http://localhost:11434/v1`) com o `ChatOpenAI`
 do LangChain; não há chave no código. Para chamar a nuvem direto, sem servidor
 local, use `LLM_BASE_URL=https://ollama.com/v1` e uma chave de

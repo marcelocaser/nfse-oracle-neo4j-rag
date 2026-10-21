@@ -98,7 +98,7 @@ try {
     _neo4jVectorStore = await Neo4jVectorStore.fromExistingGraph(embeddings, CONFIG.neo4j);
 
     const extractor = CONFIG.extraction.enabled
-        ? new NfseExtractor(structuredModel, CONFIG.extraction.maxChars)
+        ? new NfseExtractor(structuredModel, CONFIG.extraction.maxChars, CONFIG.llm.schemaMethod)
         : null;
 
     if (CONFIG.ingest.skip) {

@@ -46,7 +46,7 @@ export function createAI(vectorStore: Neo4jVectorStore, debugLog: (...args: unkn
         topK: CONFIG.similarity.topK,
         rewriter: createChatModel(0),
         graph: CONFIG.extraction.enabled
-            ? { router: createChatModel(0), maxRows: CONFIG.extraction.maxRows }
+            ? { router: createChatModel(0), schemaMethod: CONFIG.llm.schemaMethod, maxRows: CONFIG.extraction.maxRows }
             : undefined,
     });
 }
