@@ -45,7 +45,7 @@ try {
     console.log(`📋 ${pendentes.length} documento(s) pendente(s); ${feitos.size} já processado(s).`);
 
     const extractor = CONFIG.extraction.enabled
-        ? new NfseExtractor(createChatModel(0), CONFIG.extraction.maxChars)
+        ? new NfseExtractor(createChatModel(0), CONFIG.extraction.maxChars, CONFIG.llm.schemaMethod)
         : null;
     const contagem: Record<DocumentoStatus, number> = { indexado: 0, sem_texto: 0, nao_nfse: 0, falha_extracao: 0 };
     let processados = 0;

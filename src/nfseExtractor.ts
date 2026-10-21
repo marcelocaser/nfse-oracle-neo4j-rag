@@ -382,8 +382,8 @@ export class NfseExtractor {
     private llm;
     private maxChars: number;
 
-    constructor(llm: ChatOpenAI, maxChars: number) {
-        this.llm = llm.withStructuredOutput(nfseSchema, { method: "jsonSchema" });
+    constructor(llm: ChatOpenAI, maxChars: number, schemaMethod: "jsonSchema" | "functionCalling" = "jsonSchema") {
+        this.llm = llm.withStructuredOutput(nfseSchema, { method: schemaMethod });
         this.maxChars = maxChars;
     }
 

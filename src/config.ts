@@ -67,6 +67,23 @@ function idList(value: string | undefined, envName: string): string[] {
     return ids;
 }
 
+type SchemaMethod = "jsonSchema" | "functionCalling";
+
+/**
+ * Como pedir saída estruturada (roteador e extrator). O Ollama local impõe o
+ * schema de response_format na geração; os modelos ":cloud" o ignoram e
+ * respondem em prosa ("Rota: **prestadores**."), o que quebrava o roteador.
+ * Por chamada de função (tools) eles devolvem o JSON certo.
+ */
+function schemaMethod(value: string | undefined, nlpModel: string | undefined): SchemaMethod {
+    const resolved = value?.trim();
+    if (!resolved) return nlpModel?.trim().endsWith(":cloud") ? "functionCalling" : "jsonSchema";
+    if (resolved !== "jsonSchema" && resolved !== "functionCalling") {
+        throw new Error(`LLM_STRUCTURED_OUTPUT="${value}" deve ser jsonSchema ou functionCalling.`);
+    }
+    return resolved;
+}
+
 function isoDate(value: string | undefined, envName: string): string | undefined {
     if (!value?.trim()) return undefined;
     const resolved = value.trim();
@@ -116,7 +133,13 @@ export const CONFIG = Object.freeze({
         maxRetries: 2,
         // Limita o tamanho da resposta. Também dá efeito ao max_length
         // declarado em prompts/answerPrompt.json, que antes era só documental.
-        maxTokens: 1024,
+        // Nos ":cloud" o raciocínio conta no limite: o minimax-m3.1-flash
+        // gastava os 1024 pensando numa tabela de 70 prestadores e devolvia
+        // texto vazio. Ele não reconhece reasoning_effort "none" (raciocina
+        // como sem ajuste, ~4000 tokens numa tabela de 57 municípios); com
+        // "low", ~2200.
+        maxTokens: positiveInt(process.env.LLM_MAX_TOKENS, 'LLM_MAX_TOKENS',
+            process.env.NLP_MODEL?.trim().endsWith(":cloud") ? 8192 : 1024),
         // Modelos com "thinking" (ex.: gemma4 local) gastam o maxTokens no
         // raciocínio e devolvem resposta vazia. "none" desliga o thinking na
         // API compatível com OpenAI do Ollama. Vazio = padrão do modelo.
@@ -124,6 +147,9 @@ export const CONFIG = Object.freeze({
         // "functionCalling" envia o schema como tool, que a API compatível
         // com OpenAI do Ollama suporta.
         structuredOutputMethod: "functionCalling" as const,
+        // Roteador e extrator: jsonSchema no LLM local, functionCalling nos
+        // ":cloud" (vazio = automático). Ver schemaMethod.
+        schemaMethod: schemaMethod(process.env.LLM_STRUCTURED_OUTPUT, process.env.NLP_MODEL),
     },
     oracle: {
         user: process.env.ORACLE_USER!,
