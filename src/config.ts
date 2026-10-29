@@ -84,6 +84,45 @@ function schemaMethod(value: string | undefined, nlpModel: string | undefined): 
     return resolved;
 }
 
+/** O que muda de um LLM para outro: modelo, limite de tokens e saída estruturada. */
+export interface LlmModelConfig {
+    nlpModel: string | undefined;
+    maxTokens: number;
+    schemaMethod: SchemaMethod;
+}
+
+function llmModel(nlpModel: string | undefined): LlmModelConfig {
+    return {
+        nlpModel,
+        // Limita o tamanho da resposta. Também dá efeito ao max_length
+        // declarado em prompts/answerPrompt.json, que antes era só documental.
+        // Nos ":cloud" o raciocínio conta no limite: o minimax-m3.1-flash
+        // gastava os 1024 pensando numa tabela de 70 prestadores e devolvia
+        // texto vazio. Ele não reconhece reasoning_effort "none" (raciocina
+        // como sem ajuste, ~4000 tokens numa tabela de 57 municípios); com
+        // "low", ~2200.
+        maxTokens: positiveInt(process.env.LLM_MAX_TOKENS, 'LLM_MAX_TOKENS',
+            nlpModel?.trim().endsWith(":cloud") ? 8192 : 1024),
+        // Roteador e extrator: jsonSchema no LLM local, functionCalling nos
+        // ":cloud" (vazio = automático). Ver schemaMethod.
+        schemaMethod: schemaMethod(process.env.LLM_STRUCTURED_OUTPUT, nlpModel),
+    };
+}
+
+/**
+ * "nfse-lumi=lumi-4b,nfse-minimax=minimax-m3.1-flash:cloud": outros LLMs
+ * oferecidos pela API, cada um com o nome que aparece no Open WebUI.
+ */
+function extraModels(value: string | undefined, envName: string): ({ name: string } & LlmModelConfig)[] {
+    return (value ?? "").split(",").map(par => par.trim()).filter(Boolean).map(par => {
+        const [name, nlpModel] = par.split("=").map(parte => parte?.trim());
+        if (!name || !nlpModel || !/^[\w.:-]+$/.test(name)) {
+            throw new Error(`${envName}: "${par}" deve ser nome=modelo (ex.: nfse-lumi=lumi-4b).`);
+        }
+        return { name, ...llmModel(nlpModel) };
+    });
+}
+
 function isoDate(value: string | undefined, envName: string): string | undefined {
     if (!value?.trim()) return undefined;
     const resolved = value.trim();
@@ -121,7 +160,8 @@ export const CONFIG = Object.freeze({
         // Ollama expõe uma API compatível com a da OpenAI, então o ChatOpenAI
         // segue o mesmo. Com o servidor local logado (`ollama signin`), modelos
         // `:cloud` como gemma4:cloud rodam na nuvem do Ollama sem chave no código.
-        nlpModel: process.env.NLP_MODEL,
+        // nlpModel, maxTokens e schemaMethod: ver llmModel.
+        ...llmModel(process.env.NLP_MODEL),
         url: process.env.LLM_BASE_URL?.trim() || "http://localhost:11434/v1",
         // O servidor local ignora a chave, mas o cliente da OpenAI exige um valor.
         // Para chamar https://ollama.com/v1 direto, use a chave de OLLAMA_API_KEY.
@@ -131,15 +171,6 @@ export const CONFIG = Object.freeze({
         // (ex.: "635,62" vs "R$ 635,62", razão social truncada).
         temperature: 0.3,
         maxRetries: 2,
-        // Limita o tamanho da resposta. Também dá efeito ao max_length
-        // declarado em prompts/answerPrompt.json, que antes era só documental.
-        // Nos ":cloud" o raciocínio conta no limite: o minimax-m3.1-flash
-        // gastava os 1024 pensando numa tabela de 70 prestadores e devolvia
-        // texto vazio. Ele não reconhece reasoning_effort "none" (raciocina
-        // como sem ajuste, ~4000 tokens numa tabela de 57 municípios); com
-        // "low", ~2200.
-        maxTokens: positiveInt(process.env.LLM_MAX_TOKENS, 'LLM_MAX_TOKENS',
-            process.env.NLP_MODEL?.trim().endsWith(":cloud") ? 8192 : 1024),
         // Modelos com "thinking" (ex.: gemma4 local) gastam o maxTokens no
         // raciocínio e devolvem resposta vazia. "none" desliga o thinking na
         // API compatível com OpenAI do Ollama. Vazio = padrão do modelo.
@@ -147,9 +178,6 @@ export const CONFIG = Object.freeze({
         // "functionCalling" envia o schema como tool, que a API compatível
         // com OpenAI do Ollama suporta.
         structuredOutputMethod: "functionCalling" as const,
-        // Roteador e extrator: jsonSchema no LLM local, functionCalling nos
-        // ":cloud" (vazio = automático). Ver schemaMethod.
-        schemaMethod: schemaMethod(process.env.LLM_STRUCTURED_OUTPUT, process.env.NLP_MODEL),
     },
     oracle: {
         user: process.env.ORACLE_USER!,
@@ -248,6 +276,10 @@ export const CONFIG = Object.freeze({
         key: process.env.RAG_API_KEY?.trim() || "",
         // Nome do "modelo" que aparece no Open WebUI.
         modelName: process.env.API_MODEL_NAME?.trim() || "nfse",
+        // Outros "modelos" no Open WebUI, cada um com outro LLM (o principal
+        // é o NLP_MODEL). Dividem a mesma fila: a GPU atende um por vez, e o
+        // Ollama troca o LLM carregado quando a pergunta muda de modelo.
+        extraModels: extraModels(process.env.API_EXTRA_MODELS, 'API_EXTRA_MODELS'),
         // A GPU atende uma pergunta por vez; acima disso a API responde 503
         // em vez de deixar a pessoa esperando minutos.
         maxQueue: positiveInt(process.env.API_MAX_QUEUE, 'API_MAX_QUEUE', 10),

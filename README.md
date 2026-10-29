@@ -387,9 +387,15 @@ npm run chat:down  #    para o Open WebUI
   a resposta é 503.
 - **Open WebUI**: o **primeiro cadastro vira administrador** e o cadastro se
   fecha; as contas seguintes ficam pendentes até o administrador aprovar
-  (Painel de administração → Usuários). O único modelo é o `nfse`: a
+  (Painel de administração → Usuários). O modelo padrão é o `nfse`: a
   conexão direta com o Ollama está desligada, e as tarefas de fundo (título,
   tags, sugestões, autocompletar) também, porque ocupariam a fila da GPU.
+- **Outros LLMs no seletor de modelos:** `API_EXTRA_MODELS=nfse-lumi=lumi-4b`
+  acrescenta o "modelo" `nfse-lumi`, com a mesma cadeia (roteador, grafo,
+  trechos) mas respondida pelo `lumi-4b` do Ollama; vários vão separados por
+  vírgula. Todos dividem a mesma fila. Quando a pergunta muda de modelo, o
+  Ollama troca o LLM na GPU, e a primeira resposta demora alguns segundos a
+  mais. Os dados ficam locais, a não ser que o modelo seja `:cloud`.
 - A configuração do Open WebUI vem do `docker-compose.yml`
   (`ENABLE_PERSISTENT_CONFIG=false`): ajustes feitos no painel voltam ao valor
   do compose quando o container reinicia. Usuários e conversas ficam em
