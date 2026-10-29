@@ -3,8 +3,9 @@
  * qualquer cliente OpenAI) conversar com a base de NFS-e.
  *
  *   GET  /health                → sem autenticação; confere o Neo4j
- *   GET  /v1/models             → um único "modelo" (API_MODEL_NAME)
- *   POST /v1/chat/completions   → responde a última mensagem do usuário
+ *   GET  /v1/models             → API_MODEL_NAME e os de API_EXTRA_MODELS
+ *   POST /v1/chat/completions   → responde a última mensagem do usuário com o
+ *                                 LLM do "modelo" escolhido
  *
  * Por dentro roda a mesma cadeia do npm start: roteador → grafo ou trechos →
  * resposta. Antes dela, as últimas API_HISTORY_TURNS trocas da conversa servem
@@ -18,11 +19,11 @@ import { Neo4jVectorStore } from "@langchain/community/vectorstores/neo4j_vector
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { CONFIG } from "./config.ts";
-import { type Turno } from "./ai.ts";
+import { type AI, type Turno } from "./ai.ts";
 import { createAI, createEmbeddings } from "./models.ts";
 import { stripCodeFences } from "./util.ts";
 
-const { host, port, key, modelName, maxQueue, historyTurns } = CONFIG.api;
+const { host, port, key, modelName, extraModels, maxQueue, historyTurns } = CONFIG.api;
 const MAX_BODY_BYTES = 1024 * 1024;
 
 if (!key) {
@@ -135,15 +136,26 @@ async function conectarNeo4j(tentativas = 20, intervaloMs = 3000): Promise<Neo4j
 }
 
 const store = await conectarNeo4j();
-const ai = createAI(store);
+/** Nome no Open WebUI → cadeia com o LLM daquele nome. O primeiro é o padrão. */
+const modelos = new Map<string, AI>([
+    [modelName, createAI(store)],
+    ...extraModels.map(({ name, ...llm }) => [name, createAI(store, console.log, llm)] as [string, AI]),
+]);
 
-function responder(pergunta: string, historico: Turno[], aindaConectado: () => boolean): Promise<string | null> {
+function cadeiaDo(model: unknown): AI {
+    if (model === undefined) return modelos.get(modelName)!;
+    const ai = typeof model === "string" ? modelos.get(model) : undefined;
+    if (!ai) throw new HttpError(404, `Modelo "${model}" não existe. Disponíveis: ${[...modelos.keys()].join(", ")}.`, "model_not_found");
+    return ai;
+}
+
+function responder(ai: AI, model: string, pergunta: string, historico: Turno[], aindaConectado: () => boolean): Promise<string | null> {
     return enfileirar(async () => {
         // Quem desistiu enquanto esperava na fila não ocupa a GPU.
         if (!aindaConectado()) return null;
         const inicio = Date.now();
         const resultado = await ai.anwerQuestion(pergunta, historico);
-        console.log(`⏱️  Pergunta respondida em ${((Date.now() - inicio) / 1000).toFixed(0)} s (rota: ${resultado.route ?? "-"}).`);
+        console.log(`⏱️  Pergunta respondida em ${((Date.now() - inicio) / 1000).toFixed(0)} s (modelo: ${model}, rota: ${resultado.route ?? "-"}).`);
         return stripCodeFences(resultado.answer ?? resultado.error ?? "Não consegui gerar uma resposta.");
     });
 }
@@ -151,6 +163,7 @@ function responder(pergunta: string, historico: Turno[], aindaConectado: () => b
 async function chatCompletions(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await lerJson(req);
     const { pergunta, historico } = lerConversa(body.messages);
+    const ai = cadeiaDo(body.model);
     const id = `chatcmpl-${randomUUID()}`;
     const created = Math.floor(Date.now() / 1000);
     const model = typeof body.model === "string" ? body.model : modelName;
@@ -158,7 +171,7 @@ async function chatCompletions(req: IncomingMessage, res: ServerResponse): Promi
     res.on("close", () => { if (!res.writableEnded) desconectou = true; });
 
     if (!body.stream) {
-        const resposta = await responder(pergunta, historico, () => !desconectou);
+        const resposta = await responder(ai, model, pergunta, historico, () => !desconectou);
         if (resposta === null) return;
         return enviarJson(res, 200, {
             id, object: "chat.completion", created, model,
@@ -168,7 +181,7 @@ async function chatCompletions(req: IncomingMessage, res: ServerResponse): Promi
     }
 
     // Erros de fila (503) saem antes de abrir o stream, como HTTP comum.
-    const promessa = responder(pergunta, historico, () => !desconectou);
+    const promessa = responder(ai, model, pergunta, historico, () => !desconectou);
     res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", Connection: "keep-alive" });
     const chunk = (delta: object, finish_reason: string | null = null) =>
         ({ id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta, finish_reason }] });
@@ -205,7 +218,7 @@ const server = createServer(async (req, res) => {
         if (req.method === "GET" && url.pathname === "/v1/models") {
             return enviarJson(res, 200, {
                 object: "list",
-                data: [{ id: modelName, object: "model", created: 0, owned_by: "nfse-oracle-neo4j-rag" }],
+                data: [...modelos.keys()].map(id => ({ id, object: "model", created: 0, owned_by: "nfse-oracle-neo4j-rag" })),
             });
         }
         if (req.method === "POST" && url.pathname === "/v1/chat/completions") {
@@ -227,6 +240,7 @@ const server = createServer(async (req, res) => {
 
 server.listen(port, host, () => {
     console.log(`🚀 API de perguntas em http://${host}:${port}/v1 — modelo "${modelName}", LLM ${CONFIG.llm.nlpModel}`);
+    for (const { name, nlpModel } of extraModels) console.log(`   + modelo "${name}", LLM ${nlpModel}`);
 });
 
 async function encerrar(): Promise<void> {
