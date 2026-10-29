@@ -27,7 +27,7 @@ services:
   # Chat para os usuários (npm run chat:up). Conversa só com a API de perguntas
   # (npm run serve), nunca direto com o Ollama.
   open-webui:
-    image: ghcr.io/open-webui/open-webui:v0.11.4
+    image: ghcr.io/open-webui/open-webui:v0.12.5
     container_name: open-webui
     profiles: ["chat"]
     restart: unless-stopped
